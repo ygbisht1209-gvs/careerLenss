@@ -1355,3 +1355,543 @@ button:disabled {
 #ats-results[hidden] {
     display: none !important;
 }
+
+.application-heading-actions,
+.application-controls,
+.application-actions {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+}
+
+.application-heading-actions .primary-button {
+    width: auto;
+    margin: 0;
+}
+
+.application-insights {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.application-insights article {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+}
+
+.application-insights article span {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.application-insights article strong {
+    font: 600 21px 'Space Grotesk', sans-serif;
+}
+
+.application-insights .has-due-followups strong {
+    color: #ffb08d;
+}
+
+.pipeline-panel {
+    margin-bottom: 18px;
+    padding: 18px 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel);
+}
+
+.pipeline-panel h3 {
+    margin-bottom: 14px;
+    font: 600 14px 'Space Grotesk', sans-serif;
+}
+
+.pipeline-list {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.pipeline-item {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 7px 10px;
+}
+
+.pipeline-item > span {
+    color: var(--muted);
+    font-size: 10px;
+}
+
+.pipeline-item > strong {
+    font-size: 11px;
+}
+
+.pipeline-track {
+    height: 6px;
+    overflow: hidden;
+    border-radius: 99px;
+    background: #262536;
+}
+
+.pipeline-track span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #8261d8, #b5a0ff);
+    transition: width 0.25s ease;
+}
+
+.application-controls {
+    margin-bottom: 12px;
+}
+
+.application-controls input,
+.application-controls select {
+    min-height: 38px;
+    padding: 8px 11px;
+    border: 1px solid #3b3850;
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    font: inherit;
+    font-size: 11px;
+}
+
+.application-controls input {
+    width: min(100%, 290px);
+}
+
+.application-controls select {
+    min-width: 150px;
+}
+
+.application-controls > span {
+    margin-left: auto;
+}
+
+.application-header,
+.application-row {
+    grid-template-columns: minmax(0, 1.4fr) minmax(125px, 1fr) minmax(115px, 0.8fr) auto;
+}
+
+.application-row {
+    gap: 12px;
+}
+
+.application-details,
+.application-dates {
+    min-width: 0;
+}
+
+.application-notes {
+    display: block;
+    max-width: 280px;
+    overflow: hidden;
+    color: #a4a8ba !important;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.application-job-link {
+    display: inline-block;
+    margin-top: 5px;
+    color: #bca9ff;
+    font-size: 10px;
+}
+
+.application-dates > span,
+.application-dates > small {
+    display: block;
+}
+
+.follow-up-date {
+    margin-top: 4px;
+    color: #aab5cb;
+    font-size: 10px;
+}
+
+.follow-up-date.is-overdue,
+.follow-up-date.is-due {
+    color: #ffb08d;
+    font-weight: 700;
+}
+
+.application-actions {
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.application-actions button {
+    padding: 6px 8px;
+    border: 1px solid #39364d;
+    border-radius: 6px;
+    background: #1b1a29;
+    color: #d3caed;
+    cursor: pointer;
+    font-size: 10px;
+}
+
+.application-actions .delete-application {
+    border-color: #49313a;
+    background: #24151d;
+    color: #e9a6b0;
+}
+
+.application-actions button:hover {
+    filter: brightness(1.2);
+}
+
+.application-dialog .tool-form textarea {
+    width: 100%;
+    padding: 11px 12px;
+    border: 1px solid #37384b;
+    border-radius: 8px;
+    background: #0f111b;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    resize: vertical;
+}
+
+.application-dialog .tool-form input[type="date"],
+.application-dialog .tool-form input[type="url"] {
+    width: 100%;
+}
+
+@media (max-width: 900px) {
+    .application-insights {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .pipeline-list {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 760px) {
+    .application-header,
+    .application-row {
+        grid-template-columns: minmax(0, 1.3fr) minmax(110px, 1fr) minmax(100px, 0.8fr) auto;
+    }
+
+    .application-actions {
+        flex-direction: column;
+        align-items: stretch;
+    }
+}
+
+@media (max-width: 560px) {
+    .application-heading-actions {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+
+    .application-insights {
+        gap: 8px;
+    }
+
+    .application-insights article {
+        padding: 11px;
+    }
+
+    .application-insights article span {
+        font-size: 9px;
+    }
+
+    .pipeline-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .application-controls {
+        flex-wrap: wrap;
+    }
+
+    .application-controls input {
+        width: 100%;
+    }
+
+    .application-controls > span {
+        margin-left: 0;
+    }
+
+    .application-header {
+        display: none;
+    }
+
+    .application-row {
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        padding: 13px;
+    }
+
+    .application-dates {
+        grid-column: 1;
+    }
+
+    .application-row > select {
+        grid-column: 1;
+        width: fit-content;
+    }
+
+    .application-actions {
+        grid-column: 2;
+        grid-row: 1 / span 3;
+        flex-direction: row;
+        align-items: center;
+    }
+}
+
+.interview-prep-form {
+    display: grid;
+    gap: 12px;
+}
+
+.interview-prep-form input,
+.interview-prep-form textarea,
+.practice-answer {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #3b4055;
+    border-radius: 9px;
+    background: #171a2b;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+}
+
+.interview-prep-form textarea,
+.practice-answer {
+    resize: vertical;
+}
+
+.interview-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+}
+
+.interview-form-grid > div {
+    display: grid;
+    gap: 8px;
+}
+
+.ai-assist-form {
+    max-width: 760px;
+}
+
+.ai-consent {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 14px 0;
+    line-height: 1.7;
+}
+
+.ai-consent input {
+    width: auto;
+    flex: 0 0 auto;
+    margin-top: 4px;
+    padding: 0;
+    accent-color: #9c83ee;
+}
+
+.ai-consent span {
+    color: var(--muted);
+}
+
+.ai-assist-result > div {
+    white-space: pre-wrap;
+}
+
+.interview-form-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+}
+
+.interview-form-footer .primary-button {
+    flex-shrink: 0;
+}
+
+.interview-prep-results {
+    max-width: 1000px;
+}
+
+.interview-results-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 22px;
+}
+
+.interview-results-heading h3 {
+    margin-top: 5px;
+    font: 600 21px 'Space Grotesk', sans-serif;
+}
+
+.interview-results-heading .ats-note {
+    max-width: 660px;
+    margin-top: 8px;
+}
+
+.focus-area-panel,
+.interview-checklist {
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    background: #10121d;
+}
+
+.focus-area-panel h4,
+.interview-checklist h4 {
+    margin-bottom: 12px;
+    font: 600 14px 'Space Grotesk', sans-serif;
+}
+
+.focus-area-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.focus-area-chip {
+    padding: 6px 10px;
+    border: 1px solid #413657;
+    border-radius: 99px;
+    background: #211b32;
+    color: #d7caff;
+    font-size: 10px;
+}
+
+.practice-progress {
+    display: grid;
+    grid-template-columns: auto minmax(90px, 1fr);
+    align-items: center;
+    gap: 14px;
+    margin: 20px 0 12px;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.practice-question-list {
+    display: grid;
+    gap: 12px;
+}
+
+.practice-question-card {
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    background: var(--panel);
+}
+
+.practice-question-heading {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.practice-question-number {
+    color: #bca9ff;
+    font: 600 13px 'Space Grotesk', sans-serif;
+}
+
+.practice-question-category {
+    padding: 3px 7px;
+    border-radius: 5px;
+    background: #27213a;
+    color: #d1c2ff;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+}
+
+.practice-question-card h4 {
+    font: 600 14px 'Space Grotesk', sans-serif;
+    line-height: 1.65;
+}
+
+.practice-follow-up {
+    margin: 7px 0 12px;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.practice-follow-up strong {
+    color: #c9b8ff;
+}
+
+.practice-question-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    color: #c5c7d6;
+    cursor: pointer;
+    font-size: 11px;
+}
+
+.practice-question-toggle input,
+.interview-checklist input {
+    accent-color: #9c79ef;
+}
+
+.interview-checklist {
+    margin-top: 18px;
+}
+
+.interview-checklist ul {
+    display: grid;
+    gap: 10px;
+    padding-left: 0;
+    list-style: none;
+}
+
+.interview-checklist label {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1.7;
+}
+
+.interview-checklist input {
+    margin-top: 4px;
+}
+
+#interview-prep-results[hidden] {
+    display: none !important;
+}
+
+@media (max-width: 600px) {
+    .interview-form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .interview-form-footer,
+    .interview-results-heading {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .interview-results-heading .secondary-button,
+    .interview-form-footer .primary-button {
+        width: fit-content;
+    }
+}

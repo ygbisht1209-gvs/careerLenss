@@ -55,6 +55,8 @@
             <nav class="side-nav" aria-label="Workspace navigation">
                 <a class="nav-link active" href="#dashboard">▦ <span>Dashboard</span></a>
                 <a class="nav-link" href="#ats-workspace">▤ <span>Resume ATS</span></a>
+                <a class="nav-link" href="#interview-prep-workspace">◇ <span>Interview Prep</span></a>
+                <a class="nav-link" href="#ai-assist-workspace">✦ <span>Career AI Studio</span></a>
                 <a class="nav-link" href="#linkedin-workspace">in <span>LinkedIn Optimizer</span></a>
                 <a class="nav-link" href="#assistant-workspace">✳ <span>Career Coach</span></a>
                 <a class="nav-link" href="#applications">◷ <span>Applications</span></a>
@@ -149,16 +151,55 @@
                         <p>Compare your current skills with a target job and prioritize relevant skills to develop.</p>
                         <a href="#skills-workspace" class="tool-link">Find skill gaps <span>↗</span></a>
                     </article>
+                    <article class="tool-card">
+                        <div class="tool-top"><div class="tool-icon green">◇</div><span class="tool-tag">INTERVIEWS</span></div>
+                        <h3>Interview Prep Studio</h3>
+                        <p>Turn a real job description into role-focused questions, practice prompts, and an interview-day checklist.</p>
+                        <a href="#interview-prep-workspace" class="tool-link">Build a practice pack <span>↗</span></a>
+                    </article>
+                    <article class="tool-card">
+                        <div class="tool-top"><div class="tool-icon violet">✦</div><span class="tool-tag">GEMINI AI</span></div>
+                        <h3>Career AI Studio</h3>
+                        <p>Get opt-in resume and interview coaching, or help creating clearer job descriptions and consistent interview kits.</p>
+                        <a href="#ai-assist-workspace" class="tool-link">Explore AI tools <span>↗</span></a>
+                    </article>
                 </div>
             </section>
 
             <section class="section-block applications-section" id="applications">
                 <div class="section-heading">
                     <div><p class="eyebrow">STAY ORGANIZED</p><h2>Your application status.</h2></div>
-                    <button class="secondary-button" id="add-application" type="button">+ Add application</button>
+                    <div class="application-heading-actions">
+                        <button class="secondary-button" id="export-applications" type="button">Export CSV</button>
+                        <button class="primary-button" id="add-application" type="button">+ Add application</button>
+                    </div>
+                </div>
+                <div class="application-insights" aria-label="Application pipeline summary">
+                    <article><span>Active applications</span><strong id="active-applications">0</strong></article>
+                    <article><span>Interviews</span><strong id="interview-applications">0</strong></article>
+                    <article><span>Offers</span><strong id="offer-applications">0</strong></article>
+                    <article class="follow-up-insight"><span>Follow-ups due</span><strong id="due-followups">0</strong></article>
+                </div>
+                <div class="pipeline-panel">
+                    <h3>Application pipeline</h3>
+                    <div id="application-pipeline" class="pipeline-list" aria-live="polite"></div>
+                </div>
+                <div class="application-controls">
+                    <label class="sr-only" for="application-search">Search applications</label>
+                    <input id="application-search" type="search" placeholder="Search role or company">
+                    <label class="sr-only" for="application-filter">Filter by application status</label>
+                    <select id="application-filter">
+                        <option value="all">All statuses</option>
+                        <option>Applied</option>
+                        <option>Under Review</option>
+                        <option>Interview</option>
+                        <option>Offer</option>
+                        <option>Rejected</option>
+                    </select>
+                    <span id="application-result-count" class="muted-text" aria-live="polite"></span>
                 </div>
                 <div class="application-panel">
-                    <div class="application-header"><span>POSITION / COMPANY</span><span>DATE APPLIED</span><span>STATUS</span><span></span></div>
+                    <div class="application-header"><span>POSITION / COMPANY</span><span>APPLIED / FOLLOW-UP</span><span>STATUS</span><span>ACTIONS</span></div>
                     <div id="application-list" class="application-list">
                         <div class="empty-state"><div class="empty-icon">◷</div><strong>Loading your applications...</strong></div>
                     </div>
@@ -190,6 +231,94 @@
                     <div><h3>Improvement suggestions</h3><ul id="ats-suggestions"></ul></div>
                     <p id="ats-note" class="ats-note"></p>
                 </div>
+            </section>
+
+            <section class="section-block workspace-section" id="interview-prep-workspace">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">INTERVIEW CONFIDENCE</p>
+                        <h2>Practice for the role, not just the interview.</h2>
+                        <p class="subtitle">Build a focused question set from the job description. Your text is processed for this request and is not stored.</p>
+                    </div>
+                </div>
+                <form id="interview-prep-form" class="tool-form interview-prep-form">
+                    <div class="interview-form-grid">
+                        <div>
+                            <label for="interview-role">Target role</label>
+                            <input id="interview-role" name="role" maxlength="120" required placeholder="e.g. Junior Backend Developer">
+                        </div>
+                        <div>
+                            <label for="interview-company">Company <span class="muted-text">(optional)</span></label>
+                            <input id="interview-company" name="company" maxlength="120" placeholder="e.g. Example Technologies">
+                        </div>
+                    </div>
+                    <label for="interview-job-description">Job description</label>
+                    <textarea id="interview-job-description" name="job_description" rows="8" minlength="40" maxlength="12000" required placeholder="Paste the role responsibilities and requirements here..."></textarea>
+                    <div class="interview-form-footer">
+                        <span class="muted-text">At least 40 characters. Generated prompts are practice ideas, not predictions.</span>
+                        <button class="primary-button" type="submit" id="generate-interview-prep">Build practice pack</button>
+                    </div>
+                </form>
+                <p id="interview-prep-message" class="form-message" role="status" aria-live="polite"></p>
+                <div id="interview-prep-results" class="results-panel interview-prep-results" hidden>
+                    <div class="interview-results-heading">
+                        <div>
+                            <p class="eyebrow">YOUR PRACTICE PACK</p>
+                            <h3 id="interview-pack-title"></h3>
+                            <p id="interview-pack-note" class="ats-note"></p>
+                        </div>
+                        <button class="secondary-button" id="download-interview-pack" type="button">Download practice sheet</button>
+                    </div>
+                    <section class="focus-area-panel" aria-labelledby="interview-focus-heading">
+                        <h4 id="interview-focus-heading">Job description focus areas</h4>
+                        <div id="interview-focus-areas" class="focus-area-list"></div>
+                    </section>
+                    <div class="practice-progress">
+                        <span id="practice-progress-label">0 of 0 practiced</span>
+                        <div class="pipeline-track" role="progressbar" aria-label="Interview questions practiced" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="practice-progress-bar"><span></span></div>
+                    </div>
+                    <div id="interview-question-list" class="interview-question-list"></div>
+                    <section class="interview-checklist">
+                        <h4>Interview-day checklist</h4>
+                        <ul id="interview-checklist"></ul>
+                    </section>
+                </div>
+            </section>
+
+            <section class="section-block workspace-section" id="ai-assist-workspace">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">OPTIONAL GEMINI ASSISTANCE</p>
+                        <h2>Career AI Studio.</h2>
+                        <p class="subtitle">For job seekers and employers: get focused suggestions while keeping people, not AI, in control.</p>
+                    </div>
+                </div>
+                <form id="ai-assist-form" class="tool-form ai-assist-form">
+                    <label for="ai-task">Choose a tool</label>
+                    <select id="ai-task" name="task" required>
+                        <option value="resume_feedback">Job seeker: review resume text</option>
+                        <option value="interview_answer">Job seeker: coach an interview answer</option>
+                        <option value="improve_job_description">Employer: improve a job description</option>
+                        <option value="interview_kit">Employer: create an interview kit</option>
+                    </select>
+                    <label for="ai-role">Target role</label>
+                    <input id="ai-role" name="role" maxlength="120" required placeholder="e.g. Junior Backend Developer">
+                    <label for="ai-text">Text for this request</label>
+                    <textarea id="ai-text" name="text" rows="8" minlength="40" maxlength="8000" required placeholder="Paste only the resume excerpt, interview answer, or job description you want help with."></textarea>
+                    <label class="ai-consent">
+                        <input id="ai-consent" name="consent" type="checkbox" required>
+                        <span>I agree to send the selected tool, target role, and text above to Google Gemini for this request. CareerLens does not store this AI request; Google's data-handling terms apply. Do not include passwords, contact details, or other sensitive personal information.</span>
+                    </label>
+                    <div class="interview-form-footer">
+                        <span class="muted-text">Your text is sent only after you check this box and submit. AI suggestions may be inaccurate and are not hiring decisions.</span>
+                        <button class="primary-button" type="submit" id="ai-assist-submit">Get AI suggestions</button>
+                    </div>
+                </form>
+                <p id="ai-assist-message" class="form-message" role="status" aria-live="polite"></p>
+                <section id="ai-assist-result" class="coach-answer ai-assist-result" aria-live="polite" hidden>
+                    <h3>Gemini suggestions</h3>
+                    <div id="ai-assist-answer"></div>
+                </section>
             </section>
 
             <section class="section-block workspace-section" id="linkedin-workspace">
@@ -253,7 +382,7 @@
 
     <dialog class="application-dialog" id="application-dialog">
         <form id="application-form" method="dialog" class="tool-form">
-            <div class="modal-heading"><div><p class="eyebrow">JOB SEARCH</p><h2>Add an application</h2></div><button type="button" class="close-modal" id="close-application-dialog" aria-label="Close">×</button></div>
+            <div class="modal-heading"><div><p class="eyebrow">JOB SEARCH</p><h2 id="application-dialog-title">Add an application</h2></div><button type="button" class="close-modal" id="close-application-dialog" aria-label="Close">×</button></div>
             <label for="job-title">Job title</label>
             <input id="job-title" name="title" maxlength="100" required placeholder="e.g. Python Developer">
             <label for="company-name">Company</label>
@@ -264,7 +393,13 @@
             <select id="application-status" name="status">
                 <option>Applied</option><option>Under Review</option><option>Interview</option><option>Offer</option><option>Rejected</option>
             </select>
-            <button type="submit" class="primary-button">Save application</button>
+            <label for="application-url">Job posting URL <span class="muted-text">(optional)</span></label>
+            <input id="application-url" name="job_url" type="url" maxlength="2048" placeholder="https://company.com/jobs/123">
+            <label for="application-follow-up">Follow-up date <span class="muted-text">(optional)</span></label>
+            <input id="application-follow-up" name="follow_up_on" type="date">
+            <label for="application-notes">Notes <span class="muted-text">(optional)</span></label>
+            <textarea id="application-notes" name="notes" rows="4" maxlength="2000" placeholder="Contact name, interview notes, or next steps"></textarea>
+            <button type="submit" class="primary-button" id="application-submit">Save application</button>
             <p id="application-message" class="form-message" role="status" aria-live="polite"></p>
         </form>
     </dialog>

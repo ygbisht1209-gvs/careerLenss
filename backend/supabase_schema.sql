@@ -6,8 +6,59 @@ create table if not exists public.applications (
     applied_on date not null,
     status text not null default 'Applied'
         check (status in ('Applied', 'Under Review', 'Interview', 'Offer', 'Rejected')),
+    job_url text not null default '',
+    follow_up_on date,
+    notes text not null default '',
     created_at timestamptz not null default now()
 );
+
+alter table public.applications
+    add column if not exists job_url text not null default '',
+    add column if not exists follow_up_on date,
+    add column if not exists notes text not null default '';
+
+do $$
+begin
+    if not exists (
+        select 1
+        from pg_constraint
+        where conrelid = 'public.applications'::regclass
+            and conname = 'applications_job_url_length'
+    ) then
+        alter table public.applications
+            add constraint applications_job_url_length
+            check (char_length(job_url) <= 2048);
+    end if;
+    if not exists (
+        select 1
+        from pg_constraint
+        where conrelid = 'public.applications'::regclass
+            and conname = 'applications_notes_length'
+    ) then
+        alter table public.applications
+            add constraint applications_notes_length
+            check (char_length(notes) <= 2000);
+    end if;
+    if not exists (
+        select 1
+        from pg_constraint
+        where conrelid = 'public.applications'::regclass
+            and conname = 'applications_follow_up_after_applied'
+    ) then
+        alter table public.applications
+            add constraint applications_follow_up_after_applied
+            check (follow_up_on is null or follow_up_on >= applied_on);
+    end if;
+end;
+$$;
+
+create index if not exists applications_user_applied_on_idx
+    on public.applications (user_id, applied_on desc);
+create index if not exists applications_user_status_idx
+    on public.applications (user_id, status);
+create index if not exists applications_user_follow_up_idx
+    on public.applications (user_id, follow_up_on)
+    where follow_up_on is not null;
 
 alter table public.applications enable row level security;
 
