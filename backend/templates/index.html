@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0a0b12">
+    <title>CareerLens | Your career workspace</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script defer src="{{ url_for('static', filename='script.js') }}"></script>
+</head>
+<body>
+    <section class="auth-screen" id="auth-screen" aria-labelledby="auth-title">
+        <a href="/" class="brand auth-brand">Career<span>Lens</span><b>.</b></a>
+        <div class="auth-card">
+            <p class="eyebrow">YOUR PERSONAL CAREER HUB</p>
+            <h1 id="auth-title">Welcome back.</h1>
+            <p class="auth-intro">Sign in to keep your career plans and applications together.</p>
+            <div class="auth-tabs" role="tablist" aria-label="Account options">
+                <button class="auth-tab active" type="button" role="tab" aria-selected="true" data-auth-mode="sign-in">Sign in</button>
+                <button class="auth-tab" type="button" role="tab" aria-selected="false" data-auth-mode="sign-up">Create account</button>
+            </div>
+            <form id="auth-form">
+                <label for="auth-name" id="auth-name-label" hidden>Your name</label>
+                <input id="auth-name" name="name" autocomplete="name" maxlength="80" placeholder="Your name" hidden>
+                <label for="auth-email">Email address</label>
+                <input id="auth-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required>
+                <label for="auth-password">Password</label>
+                <input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="8" placeholder="At least 8 characters" required>
+                <button class="primary-button auth-submit" id="auth-submit" type="submit">Sign in</button>
+            </form>
+            <form id="password-update-form" hidden>
+                <label for="new-password">New password</label>
+                <input id="new-password" type="password" autocomplete="new-password" minlength="8" required>
+                <label for="confirm-password">Confirm new password</label>
+                <input id="confirm-password" type="password" autocomplete="new-password" minlength="8" required>
+                <button class="primary-button auth-submit" type="submit">Update password</button>
+            </form>
+            <button type="button" class="text-button" id="forgot-password">Forgot your password?</button>
+            <p class="form-message" id="auth-message" role="status" aria-live="polite"></p>
+            <p class="setup-notice" id="setup-notice" hidden>
+                Add your Supabase project URL and public anon key to the environment before signing in. See the local setup guide in README.md.
+            </p>
+            <p class="auth-privacy">Your account is secured by Supabase. CareerLens never stores your password.</p>
+        </div>
+    </section>
+
+    <div class="workspace" id="workspace" hidden
+        data-supabase-url="{{ supabase_url }}"
+        data-supabase-anon-key="{{ supabase_anon_key }}">
+        <aside class="sidebar">
+            <a href="#dashboard" class="brand">Career<span>Lens</span><b>.</b></a>
+            <p class="nav-label">WORKSPACE</p>
+            <nav class="side-nav" aria-label="Workspace navigation">
+                <a class="nav-link active" href="#dashboard">▦ <span>Dashboard</span></a>
+                <a class="nav-link" href="#ats-workspace">▤ <span>Resume ATS</span></a>
+                <a class="nav-link" href="#linkedin-workspace">in <span>LinkedIn Optimizer</span></a>
+                <a class="nav-link" href="#assistant-workspace">✳ <span>Career Coach</span></a>
+                <a class="nav-link" href="#applications">◷ <span>Applications</span></a>
+                <a class="nav-link" href="#skills-workspace">◎ <span>Skill Gap Analysis</span></a>
+            </nav>
+            <div class="sidebar-bottom">
+                <div class="profile-avatar" id="profile-avatar">CL</div>
+                <div class="profile-text">
+                    <strong id="profile-name">Career Explorer</strong>
+                    <small id="profile-email">Your career workspace</small>
+                </div>
+            </div>
+        </aside>
+
+        <main class="main-content" id="dashboard">
+            <header class="topbar">
+                <div class="breadcrumb">Workspace <span>/</span> Dashboard</div>
+                <div class="topbar-right">
+                    <span class="status-pill"><i></i> Private workspace</span>
+                    <button class="secondary-button signout-button" id="sign-out" type="button">Sign out</button>
+                </div>
+            </header>
+
+            <section class="welcome-section">
+                <div>
+                    <p class="eyebrow">YOUR PERSONAL CAREER HUB</p>
+                    <h1>Build your next chapter.</h1>
+                    <p class="subtitle">Your skills, opportunities, and career growth — all in one place.</p>
+                </div>
+                <a class="primary-button" href="#ats-workspace">✦ Analyze my resume</a>
+            </section>
+
+            <p id="app-message" class="form-message app-message" role="status" aria-live="polite"></p>
+
+            <section class="stats-grid" aria-label="Career overview">
+                <article class="stat-card">
+                    <div class="stat-icon violet">▤</div>
+                    <p>Resume Match</p>
+                    <h2 id="ats-stat">--<small> / 100</small></h2>
+                    <span class="stat-note">Analyze your resume against a role</span>
+                </article>
+                <article class="stat-card">
+                    <div class="stat-icon green">↗</div>
+                    <p>Applications</p>
+                    <h2 id="application-count">0</h2>
+                    <span class="stat-note">Jobs in your personal tracker</span>
+                </article>
+                <article class="stat-card">
+                    <div class="stat-icon orange">◎</div>
+                    <p>Skills to Develop</p>
+                    <h2 id="skill-count">--</h2>
+                    <span class="stat-note">Find gaps for your target role</span>
+                </article>
+                <article class="stat-card">
+                    <div class="stat-icon blue">✳</div>
+                    <p>Career Profile</p>
+                    <h2 id="profile-stat">Build it</h2>
+                    <span class="stat-note">Keep your professional profile ready</span>
+                </article>
+            </section>
+
+            <section class="section-block">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">YOUR CAREER TOOLKIT</p>
+                        <h2>Move forward with confidence.</h2>
+                    </div>
+                    <span class="muted-text">Choose a tool to begin</span>
+                </div>
+                <div class="tools-grid">
+                    <article class="tool-card">
+                        <div class="tool-top"><div class="tool-icon violet">▤</div><span class="tool-tag">RESUME</span></div>
+                        <h3>ATS Resume Analyzer</h3>
+                        <p>Compare your resume with a job description and get a keyword match with practical improvement tips.</p>
+                        <a href="#ats-workspace" class="tool-link">Analyze resume <span>↗</span></a>
+                    </article>
+                    <article class="tool-card">
+                        <div class="tool-top"><div class="tool-icon blue">in</div><span class="tool-tag">PROFILE</span></div>
+                        <h3>LinkedIn Profile Builder</h3>
+                        <p>Draft and save your headline, About section, and target role in one place.</p>
+                        <a href="#linkedin-workspace" class="tool-link">Edit profile <span>↗</span></a>
+                    </article>
+                    <article class="tool-card">
+                        <div class="tool-top"><div class="tool-icon green">✳</div><span class="tool-tag">CAREER COACH</span></div>
+                        <h3>Career Coach</h3>
+                        <p>Explore practical, guided prompts for interviews, career planning, and your next steps.</p>
+                        <a href="#assistant-workspace" class="tool-link">Get guidance <span>↗</span></a>
+                    </article>
+                    <article class="tool-card">
+                        <div class="tool-top"><div class="tool-icon orange">◎</div><span class="tool-tag">DEVELOPMENT</span></div>
+                        <h3>Skill Gap Analysis</h3>
+                        <p>Compare your current skills with a target job and prioritize relevant skills to develop.</p>
+                        <a href="#skills-workspace" class="tool-link">Find skill gaps <span>↗</span></a>
+                    </article>
+                </div>
+            </section>
+
+            <section class="section-block applications-section" id="applications">
+                <div class="section-heading">
+                    <div><p class="eyebrow">STAY ORGANIZED</p><h2>Your application status.</h2></div>
+                    <button class="secondary-button" id="add-application" type="button">+ Add application</button>
+                </div>
+                <div class="application-panel">
+                    <div class="application-header"><span>POSITION / COMPANY</span><span>DATE APPLIED</span><span>STATUS</span><span></span></div>
+                    <div id="application-list" class="application-list">
+                        <div class="empty-state"><div class="empty-icon">◷</div><strong>Loading your applications...</strong></div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="section-block workspace-section" id="ats-workspace">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">RESUME INTELLIGENCE</p>
+                        <h2>Analyze your resume.</h2>
+                        <p class="subtitle">Your PDF is processed for this analysis and is not saved to your account.</p>
+                    </div>
+                </div>
+                <form id="ats-form" class="ats-form" enctype="multipart/form-data">
+                    <label for="resume-file">Resume (PDF, max 5 MB)</label>
+                    <input id="resume-file" name="resume" type="file" accept=".pdf,application/pdf" required>
+                    <label for="job-description">Target job description</label>
+                    <textarea id="job-description" name="job_description" rows="7" placeholder="Paste the complete job description here..." required></textarea>
+                    <button type="submit" class="primary-button" id="analyze-button">Analyze resume</button>
+                </form>
+                <p id="ats-message" class="form-message" role="status" aria-live="polite"></p>
+                <div id="ats-results" class="results-panel" hidden>
+                    <div class="ats-score-card"><p>Keyword Match</p><div class="ats-score"><span id="ats-score">0</span><span>%</span></div></div>
+                    <div class="ats-keyword-grid">
+                        <div><h3>Matched keywords</h3><ul id="matched-keywords"></ul></div>
+                        <div><h3>Missing keywords</h3><ul id="missing-keywords"></ul></div>
+                    </div>
+                    <div><h3>Improvement suggestions</h3><ul id="ats-suggestions"></ul></div>
+                    <p id="ats-note" class="ats-note"></p>
+                </div>
+            </section>
+
+            <section class="section-block workspace-section" id="linkedin-workspace">
+                <div class="section-heading"><div><p class="eyebrow">PROFESSIONAL BRAND</p><h2>Your profile workspace.</h2><p class="subtitle">Draft your profile here, then copy your edits to LinkedIn when you’re ready.</p></div></div>
+                <form id="profile-form" class="tool-form">
+                    <label for="profile-target-role">Target role</label>
+                    <input id="profile-target-role" maxlength="120" placeholder="e.g. Product Designer">
+                    <label for="profile-headline">LinkedIn headline</label>
+                    <input id="profile-headline" maxlength="220" placeholder="Your role, strengths, and value">
+                    <label for="profile-about">About section</label>
+                    <textarea id="profile-about" rows="6" maxlength="2600" placeholder="Summarize your experience, strengths, and the work you want to do."></textarea>
+                    <button class="primary-button" type="submit">Save profile</button>
+                    <p id="profile-message" class="form-message" role="status" aria-live="polite"></p>
+                </form>
+                <div class="tip-panel"><strong>Profile checklist</strong><ul><li>Use a clear target role and relevant keywords.</li><li>Describe measurable impact where possible.</li><li>Only include experience and skills you can support with examples.</li></ul></div>
+            </section>
+
+            <section class="section-block workspace-section" id="skills-workspace">
+                <div class="section-heading"><div><p class="eyebrow">YOUR NEXT SKILLS</p><h2>Plan your skill development.</h2><p class="subtitle">This analysis compares the text you provide; it is a starting point, not a hiring assessment.</p></div></div>
+                <form id="skill-form" class="tool-form">
+                    <label for="skill-target-role">Target role</label>
+                    <input id="skill-target-role" maxlength="120" placeholder="e.g. Data Analyst" required>
+                    <label for="current-skills">Your current skills</label>
+                    <textarea id="current-skills" rows="3" placeholder="e.g. SQL, Excel, Python, data visualization" required></textarea>
+                    <label for="skill-job-description">Skills or job requirements to compare</label>
+                    <textarea id="skill-job-description" rows="5" placeholder="Paste the requirements or describe skills for your target role..." required></textarea>
+                    <button class="primary-button" type="submit">Compare skills</button>
+                </form>
+                <div id="skill-results" class="results-panel" hidden>
+                    <h3 id="skill-result-title">Your skill comparison</h3>
+                    <div class="ats-keyword-grid">
+                        <div><h3>Skills you listed</h3><ul id="skill-matched"></ul></div>
+                        <div><h3>Skills to explore</h3><ul id="skill-missing"></ul></div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="section-block workspace-section" id="assistant-workspace">
+                <div class="section-heading"><div><p class="eyebrow">CAREER GUIDANCE</p><h2>Your career coach.</h2><p class="subtitle">Choose a topic for structured, practical guidance. This built-in coach does not connect to an external AI service.</p></div></div>
+                <div class="coach-prompts" aria-label="Choose a coaching topic">
+                    <button type="button" class="secondary-button coach-prompt" data-prompt="Help me prepare for an interview">Prepare for an interview</button>
+                    <button type="button" class="secondary-button coach-prompt" data-prompt="Help me plan my next career move">Plan my next move</button>
+                    <button type="button" class="secondary-button coach-prompt" data-prompt="Help me improve my resume">Improve my resume</button>
+                    <button type="button" class="secondary-button coach-prompt" data-prompt="Help me build a learning plan">Build a learning plan</button>
+                </div>
+                <form id="coach-form" class="coach-form">
+                    <label class="sr-only" for="coach-question">What would you like help with?</label>
+                    <input id="coach-question" maxlength="400" placeholder="Ask a career question..." required>
+                    <button class="primary-button" type="submit">Get guidance</button>
+                </form>
+                <div id="coach-answer" class="coach-answer" role="status" aria-live="polite" hidden></div>
+            </section>
+
+            <footer class="page-footer">
+                <a href="#dashboard" class="brand">Career<span>Lens</span><b>.</b></a>
+                <p>Your next opportunity starts with a clearer view.</p>
+                <span>Private to your account</span>
+            </footer>
+        </main>
+    </div>
+
+    <dialog class="application-dialog" id="application-dialog">
+        <form id="application-form" method="dialog" class="tool-form">
+            <div class="modal-heading"><div><p class="eyebrow">JOB SEARCH</p><h2>Add an application</h2></div><button type="button" class="close-modal" id="close-application-dialog" aria-label="Close">×</button></div>
+            <label for="job-title">Job title</label>
+            <input id="job-title" name="title" maxlength="100" required placeholder="e.g. Python Developer">
+            <label for="company-name">Company</label>
+            <input id="company-name" name="company" maxlength="100" required placeholder="e.g. Example Technologies">
+            <label for="application-date">Date applied</label>
+            <input id="application-date" name="applied_on" type="date" required>
+            <label for="application-status">Status</label>
+            <select id="application-status" name="status">
+                <option>Applied</option><option>Under Review</option><option>Interview</option><option>Offer</option><option>Rejected</option>
+            </select>
+            <button type="submit" class="primary-button">Save application</button>
+            <p id="application-message" class="form-message" role="status" aria-live="polite"></p>
+        </form>
+    </dialog>
+</body>
+</html>
