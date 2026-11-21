@@ -1,0 +1,24 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run CareerLens Flask app",
+			"type": "shell",
+			"command": "./.venv/bin/python",
+			"args": [
+				"-m",
+				"flask",
+				"--app",
+				"backend/app.py",
+				"run",
+				"--host",
+				"127.0.0.1",
+				"--port",
+				"5000"
+			],
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}

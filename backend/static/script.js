@@ -13,21 +13,43 @@ const applicationSearch = document.getElementById("application-search");
 const applicationFilter = document.getElementById("application-filter");
 const interviewPrepForm = document.getElementById("interview-prep-form");
 const aiAssistForm = document.getElementById("ai-assist-form");
+const jobDialog = document.getElementById("job-dialog");
+const jobForm = document.getElementById("job-form");
+const jobApplicationDialog = document.getElementById("job-application-dialog");
+const jobApplicationForm = document.getElementById("job-application-form");
 const statuses = ["Applied", "Under Review", "Interview", "Offer", "Rejected"];
-const stopWords = new Set([
-    "about", "after", "also", "and", "are", "for", "from", "have", "into",
-    "job", "our", "required", "role", "that", "the", "their", "these", "this",
-    "with", "you", "your"
-]);
+const accountTypes = ["job_seeker", "job_provider"];
 
 let supabaseClient = null;
 let currentUser = null;
 let authMode = "sign-in";
 let currentApplications = [];
+let currentCareerProfile = {};
+let careerProjects = [];
+let portfolioAvailable = true;
+let editingProjectId = null;
+let dashboardSources = {};
 let loadingUserId = null;
 let maxResumeBytes = 5 * 1024 * 1024;
 let editingApplicationId = null;
 let currentInterviewPack = null;
+let currentAccountType = null;
+let currentJobListings = [];
+let jobMatches = new Map();
+let jobProfileSummary = null;
+let currentJobApplications = [];
+let currentApplicationReviews = new Map();
+let seekerApplications = [];
+let editingJobId = null;
+let applyingToJobId = null;
+let latestCoachAnswer = "";
+let learningResources = [];
+let learningPlan = [];
+let latestSkillGapResult = null;
+let latestLearningRecommendations = null;
+let learningRecommendationError = "";
+let communityPosts = [];
+let editingCommunityPostId = null;
 
 function setMessage(element, message, kind = "") {
     element.textContent = message;
@@ -35,7 +57,102 @@ function setMessage(element, message, kind = "") {
     element.classList.toggle("success", kind === "success");
 }
 
+function createIcon(name) {
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    icon.classList.add("icon");
+    icon.setAttribute("aria-hidden", "true");
+    icon.setAttribute("focusable", "false");
+    use.setAttribute("href", `#icon-${name}`);
+    icon.appendChild(use);
+    return icon;
+}
+
+function activatePageFromHash() {
+    const pageViews = [...document.querySelectorAll("[data-page-view]")];
+    const allowedPages = pageViews.filter((page) => {
+        const allowedTypes = (page.dataset.accountTypes || page.dataset.accountType || "")
+            .split(/\s+/).filter(Boolean);
+        return !allowedTypes.length || allowedTypes.includes(currentAccountType);
+    });
+    const pageId = window.location.hash.slice(1) || "dashboard";
+    const activePage = allowedPages.find((page) => page.id === pageId)
+        || allowedPages.find((page) => page.id === (currentAccountType === "job_provider" ? "provider-dashboard" : "dashboard"));
+    if (!activePage) return;
+
+    if (window.location.hash !== `#${activePage.id}`) {
+        window.history.replaceState(null, "", `#${activePage.id}`);
+    }
+
+    const pageChanged = !activePage.classList.contains("active");
+    pageViews.forEach((page) => {
+        const isActive = page === activePage;
+        page.hidden = !isActive;
+        page.classList.toggle("active", isActive);
+    });
+    document.querySelectorAll(".nav-link").forEach((link) => {
+        const linkTypes = (link.dataset.accountTypes || link.dataset.accountType || "")
+            .split(/\s+/).filter(Boolean);
+        const permitted = !linkTypes.length || linkTypes.includes(currentAccountType);
+        link.hidden = !permitted;
+        const isActive = link.getAttribute("href") === `#${activePage.id}`;
+        link.classList.toggle("active", isActive);
+        if (isActive) {
+            link.setAttribute("aria-current", "page");
+        } else {
+            link.removeAttribute("aria-current");
+        }
+    });
+    const profileLink = document.getElementById("sidebar-profile-link");
+    const isProfilePage = ["my-profile", "employer-profile"].includes(activePage.id);
+    profileLink.classList.toggle("active", isProfilePage);
+    if (isProfilePage) {
+        profileLink.setAttribute("aria-current", "page");
+    } else {
+        profileLink.removeAttribute("aria-current");
+    }
+    document.querySelectorAll("[data-nav-account-type]").forEach((label) => {
+        label.hidden = label.dataset.navAccountType !== currentAccountType;
+    });
+    document.getElementById("page-title").textContent = activePage.dataset.pageTitle;
+
+    if (pageChanged) {
+        const mainContent = document.getElementById("main-content");
+        const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+        const scrollTarget = getComputedStyle(mainContent).overflowY === "visible" ? window : mainContent;
+        scrollTarget.scrollTo({ top: 0, behavior });
+    }
+}
+
+function configureAiTaskOptions() {
+    const taskSelect = document.getElementById("ai-task");
+    const options = [...taskSelect.options];
+    options.forEach((option) => {
+        option.hidden = Boolean(
+            option.dataset.accountType
+            && option.dataset.accountType !== currentAccountType
+        );
+    });
+    if (taskSelect.selectedOptions[0]?.hidden) {
+        taskSelect.value = options.find((option) => !option.hidden)?.value || "";
+    }
+}
+
 async function setupSupabase() {
+    const authSubmit = document.getElementById("auth-submit");
+    authSubmit.disabled = true;
+    const authCallback = new URLSearchParams(window.location.hash.slice(1));
+    if (authCallback.has("error") || authCallback.has("error_code")) {
+        const errorCode = authCallback.get("error_code");
+        const expiredLink = errorCode === "otp_expired";
+        const message = expiredLink
+            ? "This email link has expired or was already used. For account verification, enter your email and request a fresh link below. For password recovery, request a new reset email."
+            : "This authentication link could not be used. Sign in or request a new email link, then try again.";
+        document.getElementById("resend-confirmation").hidden = !expiredLink;
+        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+        setMessage(authMessage, message, "error");
+    }
+
     if (!window.supabase?.createClient) {
         setMessage(authMessage, "Could not load the authentication client. Check your internet connection and reload.", "error");
         authForm.querySelector("button[type='submit']").disabled = true;
@@ -72,13 +189,20 @@ async function setupSupabase() {
         return;
     }
 
-    supabaseClient = window.supabase.createClient(url, anonKey, {
-        auth: {
-            autoRefreshToken: true,
-            persistSession: true,
-            detectSessionInUrl: true
-        }
-    });
+    try {
+        supabaseClient = window.supabase.createClient(url, anonKey, {
+            auth: {
+                autoRefreshToken: true,
+                persistSession: true,
+                detectSessionInUrl: true
+            }
+        });
+    } catch (error) {
+        setMessage(authMessage, "Could not initialize Supabase authentication. Check the project URL and public anon key in backend/.env, then restart CareerLens.", "error");
+        return;
+    }
+
+    authSubmit.disabled = false;
 
     supabaseClient.auth.onAuthStateChange((event, session) => {
         if (!session) {
@@ -111,13 +235,51 @@ function showAuthScreen() {
 
 function clearWorkspaceData() {
     currentApplications = [];
+    currentCareerProfile = {};
+    careerProjects = [];
+    portfolioAvailable = true;
+    editingProjectId = null;
+    dashboardSources = {};
+    currentAccountType = null;
+    currentJobListings = [];
+    jobMatches = new Map();
+    jobProfileSummary = null;
+    learningResources = [];
+    learningPlan = [];
+    latestSkillGapResult = null;
+    latestLearningRecommendations = null;
+    learningRecommendationError = "";
+    communityPosts = [];
+    editingCommunityPostId = null;
+    populateSkillJobListings();
+    currentJobApplications = [];
+    currentApplicationReviews = new Map();
+    seekerApplications = [];
+    editingJobId = null;
+    applyingToJobId = null;
+    jobForm.reset();
+    jobApplicationForm.reset();
+    if (jobDialog.open) jobDialog.close();
+    if (jobApplicationDialog.open) jobApplicationDialog.close();
     applicationSearch.value = "";
     applicationFilter.value = "all";
     renderApplications();
     document.getElementById("profile-form").reset();
+    document.getElementById("my-profile-form").reset();
+    setMessage(document.getElementById("my-profile-message"), "");
+    document.getElementById("employer-profile-form").reset();
+    setMessage(document.getElementById("employer-profile-message"), "");
+    document.getElementById("portfolio-form").reset();
+    document.getElementById("portfolio-project-list").replaceChildren();
+    document.getElementById("portfolio-empty").hidden = false;
+    resetPortfolioEditor();
     document.getElementById("skill-form").reset();
     document.getElementById("ats-form").reset();
     document.getElementById("coach-form").reset();
+    latestCoachAnswer = "";
+    document.getElementById("coach-consent").checked = false;
+    document.getElementById("coach-message").textContent = "";
+    document.getElementById("coach-answer-content").replaceChildren();
     interviewPrepForm.reset();
     aiAssistForm.reset();
     document.getElementById("interview-prep-results").hidden = true;
@@ -125,19 +287,62 @@ function clearWorkspaceData() {
     document.getElementById("ai-assist-result").hidden = true;
     document.getElementById("ai-assist-answer").textContent = "";
     setMessage(document.getElementById("ai-assist-message"), "");
+    document.getElementById("linkedin-ai-form").reset();
+    document.getElementById("linkedin-ai-result").hidden = true;
+    document.getElementById("linkedin-ai-answer").textContent = "";
+    setMessage(document.getElementById("linkedin-ai-message"), "");
     currentInterviewPack = null;
     document.getElementById("profile-name").textContent = "Career Explorer";
     document.getElementById("profile-email").textContent = "Your career workspace";
     document.getElementById("profile-avatar").textContent = "CL";
+    document.getElementById("my-profile-email").value = "";
+    document.getElementById("employer-profile-email").value = "";
+    document.getElementById("sidebar-profile-link").hidden = true;
+    document.getElementById("sidebar-profile-link").href = "#my-profile";
+    document.getElementById("sidebar-profile-link").setAttribute("aria-label", "Open profile");
+    document.getElementById("provider-job-filter").value = "all";
+    document.getElementById("provider-applicant-filter").value = "all";
+    document.getElementById("job-search").value = "";
+    document.getElementById("job-type-filter").value = "all";
+    document.getElementById("job-sort").value = "relevance";
+    const profileGuidance = document.getElementById("job-profile-guidance");
+    profileGuidance.hidden = true;
+    profileGuidance.textContent = "";
+    document.getElementById("skill-job-listing").value = "";
     document.getElementById("profile-stat").textContent = "Build it";
     document.getElementById("skill-count").textContent = "--";
     document.getElementById("ats-stat").innerHTML = "--<small> / 100</small>";
     document.getElementById("skill-results").hidden = true;
+    document.getElementById("skill-gap-list").replaceChildren();
     document.getElementById("ats-results").hidden = true;
     document.getElementById("coach-answer").hidden = true;
     setMessage(document.getElementById("app-message"), "");
     setMessage(document.getElementById("profile-message"), "");
+    setMessage(document.getElementById("portfolio-message"), "");
+    setMessage(document.getElementById("dashboard-message"), "");
+    setMessage(document.getElementById("skill-message"), "");
     setMessage(document.getElementById("ats-message"), "");
+    setMessage(document.getElementById("job-board-message"), "");
+    setMessage(document.getElementById("provider-jobs-message"), "");
+    setMessage(document.getElementById("provider-applicants-message"), "");
+    setMessage(document.getElementById("my-job-applications-message"), "");
+    document.getElementById("job-board-list").replaceChildren();
+    document.getElementById("provider-job-list").replaceChildren();
+    document.getElementById("provider-applicant-board").replaceChildren();
+    document.getElementById("my-job-application-list").replaceChildren();
+    document.getElementById("learning-resource-list").replaceChildren();
+    document.getElementById("learning-in-progress-list").replaceChildren();
+    document.getElementById("learning-completed-list").replaceChildren();
+    document.getElementById("learning-not-started-list").replaceChildren();
+    document.getElementById("learning-targeted-skills").replaceChildren();
+    document.getElementById("learning-recommendations-list").replaceChildren();
+    document.getElementById("learning-search").value = "";
+    document.getElementById("learning-category-filter").value = "all";
+    document.getElementById("learning-difficulty-filter").value = "all";
+    setMessage(document.getElementById("learning-message"), "");
+    setMessage(document.getElementById("skill-learning-message"), "");
+    renderLearningWorkspace();
+    renderDashboard();
 }
 
 async function openWorkspace(user) {
@@ -147,14 +352,66 @@ async function openWorkspace(user) {
     currentUser = user;
     authScreen.hidden = true;
     workspace.hidden = false;
+    updateProfileIdentity(user);
+    document.getElementById("my-profile-email").value = user.email || "";
+
+    if (loadingUserId === user.id) return;
+    loadingUserId = user.id;
+    try {
+        const { data, error } = await supabaseClient
+            .from("user_accounts")
+            .select("account_type")
+            .eq("user_id", user.id)
+            .maybeSingle();
+        if (error) throw error;
+        if (!data || !accountTypes.includes(data.account_type)) {
+            throw new Error("Your CareerLens account type is missing. Run the latest backend/supabase_schema.sql in your Supabase SQL Editor, then sign in again.");
+        }
+        currentAccountType = data.account_type;
+        const profileLink = document.getElementById("sidebar-profile-link");
+        profileLink.hidden = false;
+        profileLink.href = currentAccountType === "job_provider" ? "#employer-profile" : "#my-profile";
+        profileLink.setAttribute(
+            "aria-label",
+            currentAccountType === "job_provider" ? "Open Employer Profile" : "Open My Profile"
+        );
+        configureAiTaskOptions();
+        activatePageFromHash();
+        if (currentAccountType === "job_provider") {
+            await Promise.all([loadEmployerProfile(), loadProviderWorkspace(), loadCommunityFeed()]);
+        } else {
+            dashboardSources = {
+                profile: null,
+                manualApplications: null,
+                careerApplications: null,
+                recommendations: null,
+                learning: null,
+                portfolio: null
+            };
+            renderDashboard();
+            await Promise.all([
+                loadApplications(),
+                loadProfile(),
+                loadSeekerApplications(),
+                loadJobBoard(),
+                loadLearningWorkspace(),
+                loadPortfolioProjects(),
+                loadCommunityFeed()
+            ]);
+        }
+    } catch (error) {
+        loadingUserId = null;
+        setMessage(document.getElementById("app-message"), supabaseErrorMessage(error), "error");
+    }
+}
+
+function updateProfileIdentity(user) {
     const displayName = user.user_metadata?.full_name || user.email?.split("@")[0] || "Career Explorer";
     document.getElementById("profile-name").textContent = displayName;
     document.getElementById("profile-email").textContent = user.email || "";
     document.getElementById("profile-avatar").textContent = displayName.trim().slice(0, 2).toUpperCase();
-
-    if (loadingUserId === user.id) return;
-    loadingUserId = user.id;
-    await Promise.all([loadApplications(), loadProfile()]);
+    const nameInput = document.getElementById("my-profile-name");
+    if (nameInput) nameInput.value = user.user_metadata?.full_name || displayName;
 }
 
 function setAuthMode(mode) {
@@ -170,6 +427,10 @@ function setAuthMode(mode) {
     document.getElementById("auth-name-label").hidden = !signingUp;
     document.getElementById("auth-name").required = signingUp;
     document.getElementById("auth-password").autocomplete = signingUp ? "new-password" : "current-password";
+    document.getElementById("account-type-selector").hidden = !signingUp;
+    if (signingUp) {
+        authForm.querySelector('input[name="account_type"][value="job_seeker"]').checked = true;
+    }
     document.getElementById("auth-submit").textContent = signingUp ? "Create account" : "Sign in";
     document.getElementById("forgot-password").hidden = signingUp;
     setMessage(authMessage, "");
@@ -177,7 +438,10 @@ function setAuthMode(mode) {
 
 async function handleAuthSubmit(event) {
     event.preventDefault();
-    if (!supabaseClient) return;
+    if (!supabaseClient) {
+        setMessage(authMessage, "Supabase authentication is not ready. Check your connection, reload CareerLens, and wait for the Sign in button to become enabled.", "error");
+        return;
+    }
 
     const formData = new FormData(authForm);
     const email = String(formData.get("email") || "").trim();
@@ -189,10 +453,17 @@ async function handleAuthSubmit(event) {
     try {
         if (authMode === "sign-up") {
             const fullName = String(formData.get("name") || "").trim();
+            const accountType = String(formData.get("account_type") || "job_seeker");
+            if (!accountTypes.includes(accountType)) {
+                throw new Error("Choose whether you are joining as a job seeker or job provider.");
+            }
             const { data, error } = await supabaseClient.auth.signUp({
                 email,
                 password,
-                options: { data: { full_name: fullName }, emailRedirectTo: window.location.origin }
+                options: {
+                    data: { full_name: fullName, account_type: accountType },
+                    emailRedirectTo: window.location.origin
+                }
             });
             if (error) throw error;
             if (!data.session) {
@@ -205,7 +476,7 @@ async function handleAuthSubmit(event) {
     } catch (error) {
         setMessage(authMessage, error.message || "Could not sign in. Please try again.", "error");
     } finally {
-        button.disabled = false;
+        button.disabled = !supabaseClient;
     }
 }
 
@@ -228,6 +499,32 @@ async function sendPasswordReset() {
         setMessage(authMessage, "If an account exists for that address, a password-reset link is on its way.", "success");
     } catch (error) {
         setMessage(authMessage, error.message || "Could not send the reset email.", "error");
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function resendSignupConfirmation() {
+    if (!supabaseClient) return;
+    const email = document.getElementById("auth-email").value.trim();
+    const button = document.getElementById("resend-confirmation");
+    if (!email) {
+        setMessage(authMessage, "Enter your email address first.", "error");
+        document.getElementById("auth-email").focus();
+        return;
+    }
+
+    button.disabled = true;
+    try {
+        const { error } = await supabaseClient.auth.resend({
+            type: "signup",
+            email,
+            options: { emailRedirectTo: window.location.origin }
+        });
+        if (error) throw error;
+        setMessage(authMessage, "If that address has an unverified account, a new verification link is on its way.", "success");
+    } catch (error) {
+        setMessage(authMessage, error.message || "Could not resend the verification email.", "error");
     } finally {
         button.disabled = false;
     }
@@ -271,6 +568,22 @@ async function signOut() {
 }
 
 function supabaseErrorMessage(error) {
+    const errorText = `${error?.message || ""} ${error?.details || ""}`;
+    if (
+        /user_accounts\.recruiter_title does not exist/i.test(errorText)
+        || /recruiter_title.*user_accounts.*schema cache/i.test(errorText)
+    ) {
+        return "The employer profile field is missing. In the same Supabase project configured by backend/.env, run backend/migrations/phase11_employer_profile.sql, then reload CareerLens.";
+    }
+    if (
+        /career_profiles\.linkedin_(?:target_role|headline|about)_draft does not exist/i.test(errorText)
+        || /linkedin_(?:target_role|headline|about)_draft.*career_profiles.*schema cache/i.test(errorText)
+    ) {
+        return "Supabase is missing the LinkedIn draft columns. In the same project configured by backend/.env, run the full backend/migrations/phase10_my_profile.sql and confirm it finishes successfully. If it already ran, verify those columns exist on public.career_profiles and that the project matches backend/.env, then reload CareerLens.";
+    }
+    if (/user_accounts|job_listings|job_applications|application_reviews|application-resumes|bucket not found/i.test(`${error?.message || ""} ${error?.details || ""}`)) {
+        return "CareerLens could not find the latest hiring tables or private résumé storage. In the Supabase project configured in backend/.env, run the latest backend/supabase_schema.sql from the SQL Editor, then reload the app.";
+    }
     if (error?.code === "42P01" || error?.code === "PGRST205") {
         return "Supabase cannot find the public.applications table. In the Supabase project configured in backend/.env, open SQL Editor, run the full backend/supabase_schema.sql file, wait for it to finish successfully, then reload CareerLens.";
     }
@@ -291,13 +604,886 @@ async function loadApplications() {
         if (currentUser?.id !== userId) return false;
         if (error) throw error;
         currentApplications = data;
+        dashboardSources.manualApplications = true;
         renderApplications();
+        renderDashboard();
         return true;
     } catch (error) {
         if (currentUser?.id !== userId) return false;
         setMessage(document.getElementById("app-message"), supabaseErrorMessage(error), "error");
         applicationList.replaceChildren();
+        dashboardSources.manualApplications = false;
+        renderDashboard();
         return false;
+    }
+}
+
+async function loadProviderWorkspace() {
+    const userId = currentUser?.id;
+    if (!userId) return;
+    const [jobsResult, applicationsResult, reviewsResult] = await Promise.all([
+        supabaseClient.from("job_listings").select("*").order("created_at", { ascending: false }),
+        supabaseClient
+            .from("job_applications")
+            .select("id,job_id,applicant_id,applicant_name,applicant_email,cover_note,resume_path,status,created_at,job_listings(title,company)")
+            .order("created_at", { ascending: false }),
+        supabaseClient
+            .from("application_reviews")
+            .select("application_id,reviewer_notes,interview_at")
+    ]);
+    if (currentUser?.id !== userId) return;
+    if (jobsResult.error) throw jobsResult.error;
+    if (applicationsResult.error) throw applicationsResult.error;
+    if (reviewsResult.error) throw reviewsResult.error;
+    currentJobListings = jobsResult.data || [];
+    currentJobApplications = applicationsResult.data || [];
+    currentApplicationReviews = new Map(
+        (reviewsResult.data || []).map((review) => [review.application_id, review])
+    );
+    renderProviderWorkspace();
+}
+
+async function loadSeekerApplications() {
+    const userId = currentUser?.id;
+    if (!userId) return;
+    const { data, error } = await supabaseClient
+        .from("job_applications")
+        .select("id,job_id,job_title,company,status,resume_path,created_at")
+        .order("created_at", { ascending: false });
+    if (currentUser?.id !== userId) return;
+    if (error) {
+        dashboardSources.careerApplications = false;
+        setMessage(document.getElementById("my-job-applications-message"), supabaseErrorMessage(error), "error");
+        renderDashboard();
+        return;
+    }
+    seekerApplications = data || [];
+    dashboardSources.careerApplications = true;
+    renderSeekerApplications();
+    renderDashboard();
+}
+
+async function loadJobBoard() {
+    const userId = currentUser?.id;
+    if (!userId || currentAccountType !== "job_seeker") return;
+    setMessage(
+        document.getElementById("job-board-message"),
+        "Comparing your profile with published jobs..."
+    );
+    try {
+        const result = await careerApi("/api/job-recommendations");
+        if (currentUser?.id !== userId) return;
+        if (!result || !Array.isArray(result.jobs) || !result.profile) {
+            throw new Error("The recommendation service returned an unexpected response.");
+        }
+        const providerIds = [...new Set(
+            result.jobs.map((job) => job?.provider_id).filter(Boolean)
+        )];
+        const recruiterProfilesResult = providerIds.length
+            ? await supabaseClient
+                .from("user_accounts")
+                .select("user_id,display_name,recruiter_title")
+                .in("user_id", providerIds)
+            : { data: [], error: null };
+        if (currentUser?.id !== userId) return;
+        const recruiterProfiles = new Map(
+            (recruiterProfilesResult.data || [])
+                .map((profile) => [profile.user_id, profile])
+        );
+        currentJobListings = result.jobs.map((job) => ({
+            ...job,
+            recruiter_profile: recruiterProfiles.get(job.provider_id) || null
+        }));
+        jobMatches = new Map(
+            result.jobs.filter((job) => job?.id && job.match)
+                .map((job) => [job.id, job.match])
+        );
+        jobProfileSummary = result.profile;
+        dashboardSources.recommendations = true;
+        populateSkillJobListings();
+        renderJobBoard();
+        const guidance = document.getElementById("job-profile-guidance");
+        const missing = jobProfileSummary.missing_fields || [];
+        const messages = [];
+        if (recruiterProfilesResult.error) {
+            messages.push(
+                `Recruiter details are unavailable: ${supabaseErrorMessage(recruiterProfilesResult.error)}`
+            );
+        }
+        if (!jobProfileSummary.complete && missing.length) {
+            messages.push(
+                `Your profile is incomplete (${missing.join(", ")} missing). Recommendations may be less informative until you add genuine profile skills and experience. Update your profile in My Profile.`
+            );
+        }
+        if (jobProfileSummary.learning_records_available === false) {
+            messages.push(
+                "Learning-plan records are unavailable, so saved learning activity is not included in these explanations."
+            );
+        }
+        if (jobProfileSummary.portfolio_evidence_available === false) {
+            messages.push(
+                "Private portfolio projects are not included. Install the Phase 5 portfolio migration to use project evidence."
+            );
+        }
+        guidance.hidden = !messages.length;
+        guidance.textContent = messages.join(" ");
+        setMessage(document.getElementById("job-board-message"), "");
+        renderDashboard();
+    } catch (error) {
+        if (currentUser?.id !== userId) return;
+        currentJobListings = [];
+        jobMatches = new Map();
+        jobProfileSummary = null;
+        dashboardSources.recommendations = false;
+        const guidance = document.getElementById("job-profile-guidance");
+        guidance.hidden = true;
+        guidance.textContent = "";
+        populateSkillJobListings();
+        setMessage(
+            document.getElementById("job-board-message"),
+            error.message || "Could not load job recommendations.",
+            "error"
+        );
+        renderJobBoard();
+        renderDashboard();
+    }
+}
+
+function populateSkillJobListings() {
+    const select = document.getElementById("skill-job-listing");
+    select.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Enter a job description below";
+    select.appendChild(placeholder);
+    currentJobListings.forEach((job) => {
+        const option = document.createElement("option");
+        option.value = job.id;
+        option.textContent = `${job.title} · ${job.company}`;
+        select.appendChild(option);
+    });
+}
+
+function fillSkillAnalysisFromJob() {
+    const job = currentJobListings.find(
+        (listing) => listing.id === document.getElementById("skill-job-listing").value
+    );
+    if (!job) return;
+    document.getElementById("skill-target-role").value = job.title;
+    document.getElementById("skill-job-description").value =
+        [job.description, job.requirements].filter(Boolean).join("\n\n");
+}
+
+function renderProviderWorkspace() {
+    renderProviderJobs();
+    renderProviderApplicants();
+    renderProviderMetrics();
+}
+
+function renderProviderMetrics() {
+    const open = currentJobListings.filter((job) => job.status === "published").length;
+    const closed = currentJobListings.filter((job) => job.status === "closed").length;
+    const review = currentJobApplications.filter((application) =>
+        ["Submitted", "CV review", "Shortlisted", "Interview"].includes(application.status)
+    ).length;
+    document.getElementById("provider-open-count").textContent = String(open);
+    document.getElementById("provider-applicant-count").textContent = String(currentJobApplications.length);
+    document.getElementById("provider-review-count").textContent = String(review);
+    document.getElementById("provider-closed-count").textContent = String(closed);
+
+    const recent = document.getElementById("provider-recent-applicants");
+    recent.replaceChildren();
+    currentJobApplications.slice(0, 4).forEach((application) => {
+        const row = document.createElement("article");
+        row.className = "provider-applicant-row";
+        const details = document.createElement("div");
+        const name = document.createElement("strong");
+        name.textContent = application.applicant_name;
+        const role = document.createElement("small");
+        role.textContent = application.job_listings?.title || "Job listing";
+        details.append(name, role);
+        const status = document.createElement("span");
+        status.className = "job-status";
+        status.textContent = application.status;
+        row.append(details, status);
+        recent.appendChild(row);
+    });
+    if (!currentJobApplications.length) {
+        recent.appendChild(createEmptyState("No applications yet", "Publish a job to start receiving applications."));
+    }
+}
+
+function createEmptyState(title, message) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    const icon = document.createElement("div");
+    icon.className = "empty-icon";
+    icon.appendChild(createIcon("search"));
+    const heading = document.createElement("strong");
+    heading.textContent = title;
+    const description = document.createElement("p");
+    description.textContent = message;
+    empty.append(icon, heading, description);
+    return empty;
+}
+
+function createMatchSkillList(title, skills) {
+    const section = document.createElement("section");
+    section.className = "job-match-skill-group";
+    const heading = document.createElement("h4");
+    heading.textContent = title;
+    section.appendChild(heading);
+    if (!skills.length) {
+        const empty = document.createElement("p");
+        empty.textContent = "No explicitly classified skills in this group.";
+        section.appendChild(empty);
+        return section;
+    }
+
+    const list = document.createElement("ul");
+    skills.forEach((skill) => {
+        const item = document.createElement("li");
+        const label = document.createElement("strong");
+        label.textContent = `${skill.name} · ${skill.status}`;
+        item.appendChild(label);
+        const excerpt = document.createElement("p");
+        excerpt.textContent = `Job listing: ${skill.excerpt}`;
+        item.appendChild(excerpt);
+        skill.evidence.forEach((evidence) => {
+            const evidenceText = document.createElement("p");
+            evidenceText.textContent = `${evidence.source}: ${evidence.excerpt}`;
+            item.appendChild(evidenceText);
+        });
+        const explanation = document.createElement("p");
+        explanation.textContent = skill.explanation;
+        item.appendChild(explanation);
+        list.appendChild(item);
+    });
+    section.appendChild(list);
+    return section;
+}
+
+function createJobMatchDetails(job, match) {
+    const details = document.createElement("details");
+    details.className = "job-match-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "Why this job is recommended";
+    details.appendChild(summary);
+
+    const explanation = document.createElement("div");
+    explanation.className = "job-match-explanation";
+    const score = document.createElement("p");
+    score.className = "job-match-score-explanation";
+    score.textContent = match.score === null
+        ? "Profile alignment score unavailable. Add saved profile skills or experience to compare against recognized requirements."
+        : `Profile-to-job evidence alignment: ${match.score}/100. Required skills carry 80% of the score and preferred skills 20% when both are present. Demonstrated profile context counts as 100%, a listed skill without context as 35%, and no evidence found as 0%.`;
+    explanation.appendChild(score);
+    explanation.append(
+        createMatchSkillList("Required skills", match.required_skills || []),
+        createMatchSkillList("Preferred skills", match.preferred_skills || [])
+    );
+
+    const otherSkills = match.other_skill_mentions || [];
+    if (otherSkills.length) {
+        const other = document.createElement("p");
+        other.className = "job-match-other-skills";
+        other.textContent = `Other skill mentions not used in the score (not explicitly marked required or preferred): ${otherSkills.map((skill) => skill.name).join(", ")}.`;
+        explanation.appendChild(other);
+    }
+
+    if ((match.next_steps || []).length) {
+        const nextHeading = document.createElement("h4");
+        nextHeading.textContent = "Suggested next steps";
+        const nextSteps = document.createElement("ul");
+        match.next_steps.forEach((step) => {
+            const item = document.createElement("li");
+            item.textContent = step;
+            nextSteps.appendChild(item);
+        });
+        explanation.append(nextHeading, nextSteps);
+    }
+
+    const limitations = document.createElement("ul");
+    limitations.className = "job-match-limitations";
+    (match.limitations || []).forEach((limitation) => {
+        const item = document.createElement("li");
+        item.textContent = limitation;
+        limitations.appendChild(item);
+    });
+    explanation.appendChild(limitations);
+
+    const learningSkills = [
+        ...(match.required_skills || []),
+        ...(match.preferred_skills || [])
+    ].filter((skill) => skill.status !== "Demonstrated");
+    if (learningSkills.length) {
+        const learningHeading = document.createElement("h4");
+        learningHeading.textContent = "Learning resources for skills to investigate";
+        const learningMessage = document.createElement("p");
+        learningMessage.className = "job-learning-message";
+        learningMessage.setAttribute("role", "status");
+        learningMessage.setAttribute("aria-live", "polite");
+        const learningList = document.createElement("div");
+        learningList.className = "job-learning-resource-list";
+        const button = document.createElement("button");
+        button.className = "secondary-button";
+        button.type = "button";
+        button.textContent = "Find matching learning resources";
+        button.addEventListener("click", async () => {
+            button.disabled = true;
+            learningMessage.classList.remove("error", "success");
+            learningMessage.textContent = "Finding resources in the learning catalogue...";
+            learningList.replaceChildren();
+            try {
+                const resources = await careerApi("/api/learning/recommendations", {
+                    method: "POST",
+                    body: JSON.stringify({
+                        skills: learningSkills.map(({ name, status }) => ({ name, status }))
+                    })
+                });
+                if (!Array.isArray(resources)) {
+                    throw new Error("The learning service returned an unexpected response.");
+                }
+                if (!resources.length) {
+                    learningMessage.textContent = "No matching resources are currently available in the learning catalogue.";
+                    return;
+                }
+                learningMessage.textContent = "";
+                resources.forEach((resource) => {
+                    learningList.appendChild(createLearningResourceCard(resource, {
+                        matchedSkills: resource.matched_skills || [],
+                        feedbackMessageId: "learning-message"
+                    }));
+                });
+            } catch (error) {
+                learningMessage.textContent =
+                    error.message || "Could not load matching learning resources.";
+                learningMessage.classList.add("error");
+            } finally {
+                button.disabled = false;
+            }
+        });
+        explanation.append(learningHeading, button, learningMessage, learningList);
+    }
+
+    details.appendChild(explanation);
+    return details;
+}
+
+function createJobCard(job, { provider = false, application = null, match = null } = {}) {
+    const card = document.createElement("article");
+    card.className = provider ? "provider-job-card" : "job-card";
+    const matchDetails = match || (job.id ? jobMatches.get(job.id) : null);
+    const heading = document.createElement("div");
+    heading.className = "job-card-heading";
+    const identity = document.createElement("div");
+    const title = document.createElement("h3");
+    title.textContent = job.title;
+    const company = document.createElement("p");
+    company.textContent = job.company;
+    identity.append(title, company);
+    const recruiter = job.recruiter_profile;
+    if (!provider && recruiter && (recruiter.display_name || recruiter.recruiter_title)) {
+        const recruiterDetails = document.createElement("p");
+        recruiterDetails.className = "job-card-recruiter";
+        recruiterDetails.textContent = [
+            "Recruiter",
+            [recruiter.display_name, recruiter.recruiter_title].filter(Boolean).join(" · ")
+        ].join(": ");
+        identity.appendChild(recruiterDetails);
+    }
+    heading.appendChild(identity);
+
+    const status = document.createElement("span");
+    const statusLabel = application?.status || job.status || "Published";
+    status.className = `job-status status-${statusLabel.toLowerCase().replaceAll(" ", "-")}`;
+    status.textContent = statusLabel;
+    heading.appendChild(status);
+    if (!provider && matchDetails) {
+        const score = document.createElement("span");
+        score.className = "job-match-score";
+        score.textContent = matchDetails.score === null
+            ? "Profile match unavailable"
+            : `${matchDetails.score}/100 alignment`;
+        heading.appendChild(score);
+    }
+    card.appendChild(heading);
+
+    const metadata = document.createElement("div");
+    metadata.className = "job-card-metadata";
+    [job.location, job.workplace_type, job.employment_type].filter(Boolean).forEach((value) => {
+        const tag = document.createElement("span");
+        tag.textContent = value;
+        metadata.appendChild(tag);
+    });
+    card.appendChild(metadata);
+
+    if (provider) {
+        const description = document.createElement("p");
+        description.className = "job-card-description";
+        description.textContent = job.description;
+        card.appendChild(description);
+        const actions = document.createElement("div");
+        actions.className = "job-card-actions";
+        const edit = document.createElement("button");
+        edit.className = "secondary-button";
+        edit.type = "button";
+        edit.textContent = "Edit";
+        edit.addEventListener("click", () => openJobDialog(job));
+        actions.appendChild(edit);
+        const statusSelect = document.createElement("select");
+        statusSelect.setAttribute("aria-label", `Listing status for ${job.title}`);
+        [["draft", "Draft"], ["published", "Published"], ["closed", "Closed"]].forEach(([value, label]) => {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = label;
+            option.selected = job.status === value;
+            statusSelect.appendChild(option);
+        });
+        statusSelect.addEventListener("change", () => updateJobStatus(job.id, statusSelect.value, statusSelect));
+        actions.appendChild(statusSelect);
+        card.appendChild(actions);
+        return card;
+    }
+
+    if (matchDetails) {
+        card.appendChild(createJobMatchDetails(job, matchDetails));
+    }
+
+    if (application) {
+        const applicationDate = document.createElement("p");
+        applicationDate.className = "job-application-date";
+        applicationDate.textContent = `Applied ${formatApplicationDate(application.created_at.slice(0, 10))}`;
+        card.append(applicationDate);
+        if (!["Hired", "Rejected", "Withdrawn"].includes(application.status)) {
+            const withdraw = document.createElement("button");
+            withdraw.className = "secondary-button withdraw-application-button";
+            withdraw.type = "button";
+            withdraw.textContent = "Withdraw application";
+            withdraw.setAttribute("aria-label", `Withdraw application for ${job.title}`);
+            withdraw.addEventListener("click", () => withdrawJobApplication(application, withdraw));
+            card.appendChild(withdraw);
+        }
+        return card;
+    }
+
+    const description = document.createElement("p");
+    description.className = "job-card-description";
+    description.textContent = job.description;
+    card.appendChild(description);
+    if (job.requirements) {
+        const requirements = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = "View requirements";
+        const requirementsText = document.createElement("p");
+        requirementsText.textContent = job.requirements;
+        requirements.append(summary, requirementsText);
+        card.appendChild(requirements);
+    }
+    const apply = document.createElement("button");
+    apply.className = "primary-button";
+    apply.type = "button";
+    apply.textContent = application ? "Application submitted" : "Apply for this job";
+    apply.disabled = Boolean(application);
+    apply.addEventListener("click", () => openJobApplication(job));
+    card.appendChild(apply);
+    return card;
+}
+
+function renderProviderJobs() {
+    const list = document.getElementById("provider-job-list");
+    list.replaceChildren();
+    if (!currentJobListings.length) {
+        list.appendChild(createEmptyState("Your first role starts here", "Create a listing to introduce your opportunity to job seekers."));
+    } else {
+        currentJobListings.forEach((job) => list.appendChild(createJobCard(job, { provider: true })));
+    }
+    updateProviderJobFilter();
+}
+
+function updateProviderJobFilter() {
+    const filter = document.getElementById("provider-job-filter");
+    const selected = filter.value;
+    filter.replaceChildren(new Option("All job listings", "all"));
+    currentJobListings.forEach((job) => filter.add(new Option(`${job.title} · ${job.company}`, job.id)));
+    filter.value = currentJobListings.some((job) => job.id === selected) ? selected : "all";
+}
+
+function renderProviderApplicants() {
+    const list = document.getElementById("provider-applicant-board");
+    const recent = document.getElementById("provider-recent-applicants");
+    const jobId = document.getElementById("provider-job-filter").value;
+    const statusFilter = document.getElementById("provider-applicant-filter").value;
+    const filtered = currentJobApplications.filter((application) =>
+        (jobId === "all" || application.job_id === jobId)
+        && (statusFilter === "all" || application.status === statusFilter)
+    );
+    list.replaceChildren();
+    if (!filtered.length) {
+        list.appendChild(createEmptyState("No applicants to show", "Applications appear here when someone applies to one of your published jobs."));
+        return;
+    }
+    filtered.forEach((application) => {
+        const card = document.createElement("article");
+        card.className = "provider-applicant-card";
+        const details = document.createElement("div");
+        details.className = "provider-applicant-details";
+        const name = document.createElement("h3");
+        name.textContent = application.applicant_name;
+        const email = document.createElement("a");
+        email.href = `mailto:${application.applicant_email}`;
+        email.textContent = application.applicant_email;
+        const role = document.createElement("p");
+        role.textContent = `${application.job_listings?.title || "Job listing"} · ${application.job_listings?.company || ""}`;
+        const note = document.createElement("p");
+        note.className = "provider-cover-note";
+        note.textContent = application.cover_note || "No message included.";
+        details.append(name, email, role, note);
+        const resume = document.createElement("button");
+        resume.type = "button";
+        resume.className = "secondary-button applicant-resume-button";
+        resume.disabled = !application.resume_path;
+        resume.textContent = application.resume_path ? "View résumé / CV" : "No résumé attached";
+        if (application.resume_path) {
+            resume.addEventListener("click", () => openApplicantResume(application, resume));
+        }
+        details.appendChild(resume);
+        const status = document.createElement("select");
+        status.setAttribute("aria-label", `Application status for ${application.applicant_name}`);
+        ["Submitted", "CV review", "Shortlisted", "Interview", "Offer", "Hired", "Rejected"].forEach((value) => {
+            const option = new Option(value, value, false, value === application.status);
+            status.appendChild(option);
+        });
+        status.addEventListener("change", () => updateJobApplicationStatus(application.id, status.value, status));
+        const date = document.createElement("small");
+        date.textContent = formatApplicationDate(application.created_at.slice(0, 10));
+        const review = currentApplicationReviews.get(application.id);
+        const reviewPanel = document.createElement("div");
+        reviewPanel.className = "applicant-review-panel";
+        const reviewHeading = document.createElement("strong");
+        reviewHeading.textContent = "Private hiring notes";
+        const interviewLabel = document.createElement("label");
+        interviewLabel.textContent = "Interview date (optional)";
+        const interviewInput = document.createElement("input");
+        interviewInput.type = "datetime-local";
+        interviewInput.setAttribute("aria-label", `Interview date for ${application.applicant_name}`);
+        interviewInput.value = review?.interview_at ? toLocalDateTimeValue(review.interview_at) : "";
+        interviewLabel.appendChild(interviewInput);
+        const notesLabel = document.createElement("label");
+        notesLabel.textContent = "Reviewer notes (only visible to your hiring team)";
+        const notesInput = document.createElement("textarea");
+        notesInput.rows = 3;
+        notesInput.maxLength = 4000;
+        notesInput.placeholder = "Record role-related strengths, questions, and next steps...";
+        notesInput.value = review?.reviewer_notes || "";
+        notesLabel.appendChild(notesInput);
+        const saveReview = document.createElement("button");
+        saveReview.type = "button";
+        saveReview.className = "secondary-button";
+        saveReview.textContent = "Save review notes";
+        saveReview.addEventListener("click", () => saveApplicationReview(application.id, notesInput, interviewInput, saveReview));
+        reviewPanel.append(reviewHeading, interviewLabel, notesLabel, saveReview);
+        card.append(details, status, date, reviewPanel);
+        list.appendChild(card);
+    });
+}
+
+async function openApplicantResume(application, button) {
+    const preview = window.open("about:blank", "_blank");
+    if (!preview) {
+        setMessage(document.getElementById("provider-applicants-message"), "Allow pop-ups to open the résumé in a new tab.", "error");
+        return;
+    }
+    preview.opener = null;
+    button.disabled = true;
+    try {
+        const { data, error } = await supabaseClient.storage
+            .from("application-resumes")
+            .createSignedUrl(application.resume_path, 300);
+        if (error) throw error;
+        preview.location.href = data.signedUrl;
+    } catch (error) {
+        preview.close();
+        setMessage(document.getElementById("provider-applicants-message"), supabaseErrorMessage(error), "error");
+    } finally {
+        button.disabled = false;
+    }
+}
+
+function toLocalDateTimeValue(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+async function saveApplicationReview(applicationId, notesInput, interviewInput, button) {
+    const previousLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = "Saving...";
+    try {
+        const { error } = await supabaseClient.from("application_reviews").upsert({
+            application_id: applicationId,
+            provider_id: currentUser.id,
+            reviewer_notes: notesInput.value.trim(),
+            interview_at: interviewInput.value ? new Date(interviewInput.value).toISOString() : null
+        }, { onConflict: "application_id" });
+        if (error) throw error;
+        currentApplicationReviews.set(applicationId, {
+            application_id: applicationId,
+            reviewer_notes: notesInput.value.trim(),
+            interview_at: interviewInput.value ? new Date(interviewInput.value).toISOString() : null
+        });
+        setMessage(document.getElementById("provider-applicants-message"), "Private review notes saved.", "success");
+    } catch (error) {
+        setMessage(document.getElementById("provider-applicants-message"), supabaseErrorMessage(error), "error");
+    } finally {
+        button.disabled = false;
+        button.textContent = previousLabel;
+    }
+}
+
+function renderJobBoard() {
+    const list = document.getElementById("job-board-list");
+    const query = document.getElementById("job-search").value.trim().toLocaleLowerCase();
+    const type = document.getElementById("job-type-filter").value;
+    const sort = document.getElementById("job-sort").value;
+    const appliedIds = new Set(seekerApplications.map((application) => application.job_id));
+    const filtered = currentJobListings.filter((job) =>
+        (type === "all" || job.employment_type === type)
+        && (!query || `${job.title} ${job.company} ${job.location} ${job.description} ${job.requirements}`
+            .toLocaleLowerCase().includes(query))
+    );
+    filtered.sort((first, second) => {
+        if (sort === "newest") {
+            return String(second.created_at || "").localeCompare(String(first.created_at || ""));
+        }
+        const firstScore = jobMatches.get(first.id)?.score;
+        const secondScore = jobMatches.get(second.id)?.score;
+        if (firstScore === null || firstScore === undefined) {
+            return secondScore === null || secondScore === undefined ? 0 : 1;
+        }
+        if (secondScore === null || secondScore === undefined) return -1;
+        return secondScore - firstScore;
+    });
+    list.replaceChildren();
+    if (!filtered.length) {
+        const hasLoadError = document.getElementById("job-board-message").classList.contains("error");
+        list.appendChild(createEmptyState(
+            hasLoadError ? "Recommendations unavailable" : "No jobs found",
+            hasLoadError
+                ? "Your application and learning workflows are unchanged. Try reloading this page later."
+                : currentJobListings.length
+                    ? "Try another search or employment type."
+                    : "No published opportunities are available right now. Try a different filter or check again later."
+        ));
+        return;
+    }
+    filtered.forEach((job) => {
+        const application = appliedIds.has(job.id) ? seekerApplications.find((item) => item.job_id === job.id) : null;
+        list.appendChild(createJobCard(job, { application, match: jobMatches.get(job.id) }));
+    });
+}
+
+function renderSeekerApplications() {
+    const list = document.getElementById("my-job-application-list");
+    list.replaceChildren();
+    if (!seekerApplications.length) {
+        list.appendChild(createEmptyState("No CareerLens applications yet", "Browse provider listings and apply to see their status here."));
+        return;
+    }
+    seekerApplications.forEach((application) => {
+        const job = { title: application.job_title, company: application.company };
+        list.appendChild(createJobCard(job, { application }));
+    });
+    renderJobBoard();
+}
+
+async function withdrawJobApplication(application, button) {
+    if (!window.confirm(`Withdraw your application for ${application.job_title}? The employer will see that it was withdrawn.`)) {
+        return;
+    }
+    const userId = currentUser?.id;
+    if (!userId) return;
+    button.disabled = true;
+    try {
+        const { error } = await supabaseClient
+            .from("job_applications")
+            .update({ status: "Withdrawn" })
+            .eq("id", application.id)
+            .eq("applicant_id", userId);
+        if (error) throw error;
+        if (currentUser?.id !== userId) return;
+        setMessage(document.getElementById("my-job-applications-message"), "Your application has been withdrawn.", "success");
+        await loadSeekerApplications();
+    } catch (error) {
+        setMessage(document.getElementById("my-job-applications-message"), supabaseErrorMessage(error), "error");
+    } finally {
+        button.disabled = false;
+    }
+}
+
+function openJobDialog(job = null) {
+    editingJobId = job?.id || null;
+    jobForm.reset();
+    document.getElementById("job-dialog-title").textContent = job ? "Edit job listing" : "Post a job";
+    document.getElementById("job-submit").textContent = job ? "Save changes" : "Save job";
+    if (job) {
+        for (const field of ["title", "company", "location", "workplace_type", "employment_type", "description", "requirements", "status"]) {
+            jobForm.elements[field].value = job[field] || "";
+        }
+    } else {
+        jobForm.elements.company.value = currentUser?.user_metadata?.company_name || "";
+    }
+    setMessage(document.getElementById("job-form-message"), "");
+    jobDialog.showModal();
+}
+
+function openJobApplication(job) {
+    applyingToJobId = job.id;
+    jobApplicationForm.reset();
+    document.getElementById("job-application-title").textContent = `Apply: ${job.title}`;
+    document.getElementById("candidate-name").value =
+        currentUser?.user_metadata?.full_name || "";
+    document.getElementById("candidate-email").value = currentUser?.email || "";
+    setMessage(document.getElementById("job-application-message"), "");
+    jobApplicationDialog.showModal();
+}
+
+async function saveJobListing(event) {
+    event.preventDefault();
+    const button = document.getElementById("job-submit");
+    button.disabled = true;
+    const values = new FormData(jobForm);
+    const payload = Object.fromEntries([
+        "title", "company", "location", "workplace_type", "employment_type", "description", "requirements", "status"
+    ].map((key) => [key, String(values.get(key) || "").trim()]));
+    try {
+        const result = editingJobId
+            ? await supabaseClient.from("job_listings").update(payload).eq("id", editingJobId)
+            : await supabaseClient.from("job_listings").insert(payload);
+        if (result.error) throw result.error;
+        jobDialog.close();
+        await loadProviderWorkspace();
+        setMessage(document.getElementById("provider-jobs-message"), "Job listing saved.", "success");
+    } catch (error) {
+        setMessage(document.getElementById("job-form-message"), supabaseErrorMessage(error), "error");
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function updateJobStatus(id, status, control) {
+    control.disabled = true;
+    try {
+        const { error } = await supabaseClient.from("job_listings").update({ status }).eq("id", id);
+        if (error) throw error;
+        await loadProviderWorkspace();
+        setMessage(document.getElementById("provider-jobs-message"), "Listing status updated.", "success");
+    } catch (error) {
+        setMessage(document.getElementById("provider-jobs-message"), supabaseErrorMessage(error), "error");
+        control.value = currentJobListings.find((job) => job.id === id)?.status || "draft";
+    } finally {
+        control.disabled = false;
+    }
+}
+
+async function submitJobApplication(event) {
+    event.preventDefault();
+    if (!applyingToJobId) return;
+    const button = document.getElementById("job-application-submit");
+    button.disabled = true;
+    const values = new FormData(jobApplicationForm);
+    const resumeFile = values.get("resume");
+    if (!(resumeFile instanceof File) || !resumeFile.name) {
+        setMessage(document.getElementById("job-application-message"), "Choose your résumé as a PDF before applying.", "error");
+        button.disabled = false;
+        return;
+    }
+    if (resumeFile.size > maxResumeBytes) {
+        setMessage(document.getElementById("job-application-message"), `The résumé PDF must be ${Math.floor(maxResumeBytes / 1024 / 1024)} MB or smaller.`, "error");
+        button.disabled = false;
+        return;
+    }
+    if (!resumeFile.name.toLowerCase().endsWith(".pdf")
+        || (resumeFile.type && resumeFile.type !== "application/pdf")) {
+        setMessage(document.getElementById("job-application-message"), "Upload a PDF résumé file.", "error");
+        button.disabled = false;
+        return;
+    }
+    if (!document.getElementById("candidate-consent").checked) {
+        setMessage(document.getElementById("job-application-message"), "Confirm that you want to share your application and résumé with this provider.", "error");
+        button.disabled = false;
+        return;
+    }
+    if (!currentUser?.id) {
+        setMessage(document.getElementById("job-application-message"), "Your session has expired. Please sign in again.", "error");
+        button.disabled = false;
+        return;
+    }
+    const payload = {
+        job_id: applyingToJobId,
+        job_title: currentJobListings.find((job) => job.id === applyingToJobId)?.title || "",
+        company: currentJobListings.find((job) => job.id === applyingToJobId)?.company || "",
+        applicant_name: String(values.get("applicant_name") || "").trim(),
+        applicant_email: String(values.get("applicant_email") || "").trim(),
+        cover_note: String(values.get("cover_note") || "").trim()
+    };
+    const resumePath = `${currentUser.id}/${applyingToJobId}/${crypto.randomUUID()}.pdf`;
+    try {
+        const signature = new TextDecoder().decode(await resumeFile.slice(0, 5).arrayBuffer());
+        if (signature !== "%PDF-") {
+            throw new Error("This file does not appear to be a valid PDF.");
+        }
+        setMessage(document.getElementById("job-application-message"), "Uploading your résumé...");
+        const upload = await supabaseClient.storage
+            .from("application-resumes")
+            .upload(resumePath, resumeFile, {
+                cacheControl: "300",
+                contentType: "application/pdf",
+                upsert: false
+            });
+        if (upload.error) throw upload.error;
+
+        const { error } = await supabaseClient.from("job_applications").insert({
+            ...payload,
+            resume_path: resumePath
+        });
+        if (error) {
+            const cleanup = await supabaseClient.storage.from("application-resumes").remove([resumePath]);
+            if (cleanup.error) {
+                throw new Error(`${error.message} The uploaded résumé could not be cleaned up; contact support.`);
+            }
+            if (error.code === "23505") throw new Error("You have already applied for this job.");
+            throw error;
+        }
+        jobApplicationDialog.close();
+        setMessage(document.getElementById("job-board-message"), "Application submitted. You can follow its status in My applications.", "success");
+        await Promise.all([loadSeekerApplications(), loadJobBoard()]);
+    } catch (error) {
+        setMessage(document.getElementById("job-application-message"), supabaseErrorMessage(error), "error");
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function updateJobApplicationStatus(id, status, control) {
+    control.disabled = true;
+    try {
+        const { error } = await supabaseClient
+            .from("job_applications")
+            .update({ status })
+            .eq("id", id);
+        if (error) throw error;
+        const application = currentJobApplications.find((item) => item.id === id);
+        if (application) application.status = status;
+        renderProviderWorkspace();
+        setMessage(document.getElementById("provider-applicants-message"), `Applicant moved to ${status}.`, "success");
+    } catch (error) {
+        setMessage(document.getElementById("provider-applicants-message"), supabaseErrorMessage(error), "error");
+        const application = currentJobApplications.find((item) => item.id === id);
+        if (application) control.value = application.status;
+    } finally {
+        control.disabled = false;
     }
 }
 
@@ -365,7 +1551,7 @@ function renderApplications() {
     if (!currentApplications.length) {
         applicationList.innerHTML = `
             <div class="empty-state">
-                <div class="empty-icon">◷</div>
+                <div class="empty-icon"><svg class="icon" aria-hidden="true"><use href="#icon-clock"></use></svg></div>
                 <strong>Your job search starts here.</strong>
                 <p>Add an application to begin tracking your progress.</p>
             </div>`;
@@ -404,7 +1590,7 @@ function renderApplications() {
             link.href = jobUrl;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
-            link.textContent = "Job posting ↗";
+            link.append(document.createTextNode("Job posting "), createIcon("arrow-up-right"));
             link.setAttribute("aria-label", `Open job posting for ${application.title} at ${application.company}`);
             details.appendChild(link);
         }
@@ -439,13 +1625,13 @@ function renderApplications() {
         const edit = document.createElement("button");
         edit.className = "edit-application";
         edit.type = "button";
-        edit.textContent = "Edit";
+        edit.append(createIcon("edit"), document.createTextNode("Edit"));
         edit.setAttribute("aria-label", `Edit ${application.title} at ${application.company}`);
         edit.addEventListener("click", () => openApplicationDialog(application));
         const remove = document.createElement("button");
         remove.className = "delete-application";
         remove.type = "button";
-        remove.textContent = "Remove";
+        remove.append(createIcon("trash"), document.createTextNode("Remove"));
         remove.setAttribute("aria-label", `Remove ${application.title} at ${application.company}`);
         remove.addEventListener("click", () => deleteApplication(application));
         actions.append(edit, remove);
@@ -617,35 +1803,135 @@ async function loadProfile() {
     if (!userId) return;
     const { data, error } = await supabaseClient
         .from("career_profiles")
-        .select("headline,about,target_role,skills")
+        .select("current_position,headline,about,target_role,skills,location,phone,education,linkedin_target_role_draft,linkedin_headline_draft,linkedin_about_draft")
         .maybeSingle();
     if (currentUser?.id !== userId) return;
     if (error) {
+        dashboardSources.profile = false;
         setMessage(document.getElementById("app-message"), supabaseErrorMessage(error), "error");
+        renderDashboard();
         return;
     }
-    if (!data) return;
-    document.getElementById("profile-target-role").value = data.target_role || "";
-    document.getElementById("profile-headline").value = data.headline || "";
-    document.getElementById("profile-about").value = data.about || "";
-    document.getElementById("skill-target-role").value = data.target_role || "";
-    document.getElementById("current-skills").value = (data.skills || []).join(", ");
-    if (data.headline || data.about || data.target_role) {
+    currentCareerProfile = data || {};
+    dashboardSources.profile = true;
+    document.getElementById("my-profile-current-role").value = currentCareerProfile.current_position || "";
+    document.getElementById("my-profile-target-role").value = currentCareerProfile.target_role || "";
+    document.getElementById("my-profile-headline").value = currentCareerProfile.headline || "";
+    document.getElementById("my-profile-about").value = currentCareerProfile.about || "";
+    document.getElementById("my-profile-skills").value = (currentCareerProfile.skills || []).join(", ");
+    document.getElementById("my-profile-location").value = currentCareerProfile.location || "";
+    document.getElementById("my-profile-phone").value = currentCareerProfile.phone || "";
+    document.getElementById("my-profile-education").value = currentCareerProfile.education || "";
+    document.getElementById("linkedin-target-role").value =
+        currentCareerProfile.linkedin_target_role_draft ?? currentCareerProfile.target_role ?? "";
+    document.getElementById("linkedin-headline-draft").value =
+        currentCareerProfile.linkedin_headline_draft ?? currentCareerProfile.headline ?? "";
+    document.getElementById("linkedin-about-draft").value =
+        currentCareerProfile.linkedin_about_draft ?? currentCareerProfile.about ?? "";
+    document.getElementById("skill-target-role").value = currentCareerProfile.target_role || "";
+    document.getElementById("current-skills").value = (currentCareerProfile.skills || []).join(", ");
+    if (
+        currentCareerProfile.headline
+        || currentCareerProfile.about
+        || currentCareerProfile.target_role
+    ) {
         document.getElementById("profile-stat").textContent = "Ready";
     }
+    renderDashboard();
 }
 
-async function saveProfile(event) {
+async function loadEmployerProfile() {
+    const userId = currentUser?.id;
+    if (!userId) return;
+    const { data, error } = await supabaseClient
+        .from("user_accounts")
+        .select("display_name,recruiter_title")
+        .eq("user_id", userId)
+        .maybeSingle();
+    if (currentUser?.id !== userId) return;
+    if (error) {
+        setMessage(
+            document.getElementById("employer-profile-message"),
+            supabaseErrorMessage(error),
+            "error"
+        );
+        return;
+    }
+    if (!data) {
+        setMessage(
+            document.getElementById("employer-profile-message"),
+            "Could not find your employer account profile.",
+            "error"
+        );
+        return;
+    }
+    document.getElementById("employer-profile-name").value =
+        currentUser.user_metadata?.full_name || data.display_name || "";
+    document.getElementById("employer-profile-title").value = data.recruiter_title || "";
+    document.getElementById("employer-profile-email").value = currentUser.email || "";
+    document.getElementById("employer-profile-phone").value =
+        currentUser.user_metadata?.recruiter_phone || "";
+}
+
+async function saveEmployerProfile(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("button[type='submit']");
+    button.disabled = true;
+    const fullName = document.getElementById("employer-profile-name").value.trim();
+    const recruiterTitle = document.getElementById("employer-profile-title").value.trim();
+    const phone = document.getElementById("employer-profile-phone").value.trim();
+    const message = document.getElementById("employer-profile-message");
+    if (!fullName || !recruiterTitle) {
+        setMessage(message, "Enter your name and job title.", "error");
+        button.disabled = false;
+        return;
+    }
+
+    try {
+        const { data, error } = await supabaseClient.auth.updateUser({
+            data: {
+                ...currentUser.user_metadata,
+                full_name: fullName,
+                recruiter_phone: phone
+            }
+        });
+        if (error) throw error;
+        if (!data.user) throw new Error("The updated account was not returned.");
+        currentUser = data.user;
+        updateProfileIdentity(currentUser);
+    } catch (error) {
+        setMessage(message, `Could not save your private contact details: ${error.message}`, "error");
+        button.disabled = false;
+        return;
+    }
+
+    const { error } = await supabaseClient
+        .from("user_accounts")
+        .update({ recruiter_title: recruiterTitle })
+        .eq("user_id", currentUser.id);
+    if (error) {
+        setMessage(
+            message,
+            `Your name and private phone were saved, but your public job title could not be saved: ${supabaseErrorMessage(error)}`,
+            "error"
+        );
+        button.disabled = false;
+        return;
+    }
+    setMessage(message, "Your employer profile has been saved.", "success");
+    button.disabled = false;
+}
+
+async function saveLinkedInDraft(event) {
     event.preventDefault();
     const button = event.currentTarget.querySelector("button[type='submit']");
     button.disabled = true;
     const payload = {
         user_id: currentUser.id,
-        target_role: document.getElementById("profile-target-role").value.trim(),
-        headline: document.getElementById("profile-headline").value.trim(),
-        about: document.getElementById("profile-about").value.trim(),
-        skills: document.getElementById("current-skills").value
-            .split(/[,;\n]/).map((skill) => skill.trim()).filter(Boolean)
+        linkedin_target_role_draft: document.getElementById("linkedin-target-role").value.trim(),
+        linkedin_headline_draft: document.getElementById("linkedin-headline-draft").value.trim(),
+        linkedin_about_draft: document.getElementById("linkedin-about-draft").value.trim()
     };
     const { error } = await supabaseClient.from("career_profiles").upsert(payload, { onConflict: "user_id" });
     button.disabled = false;
@@ -653,16 +1939,267 @@ async function saveProfile(event) {
         setMessage(document.getElementById("profile-message"), supabaseErrorMessage(error), "error");
         return;
     }
-    document.getElementById("skill-target-role").value = payload.target_role;
-    document.getElementById("current-skills").value = payload.skills.join(", ");
-    document.getElementById("profile-stat").textContent = payload.headline ? "Ready" : "In progress";
-    setMessage(document.getElementById("profile-message"), "Your profile has been saved to your account.", "success");
+    currentCareerProfile = { ...currentCareerProfile, ...payload };
+    setMessage(document.getElementById("profile-message"), "Your LinkedIn draft has been saved separately.", "success");
 }
 
-function extractKeywords(text) {
-    return new Set(
-        text.toLowerCase().match(/[a-z][a-z+#.]{1,}/g)?.filter((word) => !stopWords.has(word)) || []
+async function saveMyProfile(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("button[type='submit']");
+    button.disabled = true;
+    const fullName = document.getElementById("my-profile-name").value.trim();
+    if (!fullName) {
+        setMessage(document.getElementById("my-profile-message"), "Enter your name.", "error");
+        document.getElementById("my-profile-name").focus();
+        button.disabled = false;
+        return;
+    }
+    const payload = {
+        user_id: currentUser.id,
+        current_position: document.getElementById("my-profile-current-role").value.trim(),
+        target_role: document.getElementById("my-profile-target-role").value.trim(),
+        headline: document.getElementById("my-profile-headline").value.trim(),
+        about: document.getElementById("my-profile-about").value.trim(),
+        skills: document.getElementById("my-profile-skills").value
+            .split(/[,;\n]/).map((skill) => skill.trim()).filter(Boolean),
+        location: document.getElementById("my-profile-location").value.trim(),
+        phone: document.getElementById("my-profile-phone").value.trim(),
+        education: document.getElementById("my-profile-education").value.trim()
+    };
+
+    try {
+        const { error } = await supabaseClient
+            .from("career_profiles")
+            .upsert(payload, { onConflict: "user_id" });
+        if (error) throw error;
+    } catch (error) {
+        setMessage(
+            document.getElementById("my-profile-message"),
+            `Could not save your profile details: ${supabaseErrorMessage(error)}`,
+            "error"
+        );
+        button.disabled = false;
+        return;
+    }
+
+    currentCareerProfile = { ...currentCareerProfile, ...payload };
+    document.getElementById("current-skills").value = payload.skills.join(", ");
+    document.getElementById("skill-target-role").value = payload.target_role;
+
+    let nameUpdateError = "";
+    if (fullName !== (currentUser.user_metadata?.full_name || "")) {
+        try {
+            const { data, error } = await supabaseClient.auth.updateUser({
+                data: { ...currentUser.user_metadata, full_name: fullName }
+            });
+            if (error) throw error;
+            if (!data.user) throw new Error("The updated account was not returned.");
+            currentUser = data.user;
+            updateProfileIdentity(currentUser);
+        } catch (error) {
+            nameUpdateError = supabaseErrorMessage(error);
+        }
+    }
+
+    document.getElementById("profile-stat").textContent = payload.headline ? "Ready" : "In progress";
+    setMessage(
+        document.getElementById("my-profile-message"),
+        nameUpdateError
+            ? `Career details were saved, but your name could not be updated: ${nameUpdateError}`
+            : "Your profile has been saved.",
+        nameUpdateError ? "error" : "success"
     );
+    button.disabled = false;
+    renderDashboard();
+    await loadJobBoard();
+}
+
+function resetPortfolioEditor() {
+    editingProjectId = null;
+    document.getElementById("portfolio-form").reset();
+    document.getElementById("project-submit").textContent = "Add project";
+    document.getElementById("project-cancel-edit").hidden = true;
+}
+
+async function loadPortfolioProjects() {
+    const userId = currentUser?.id;
+    if (!userId) return;
+    setMessage(document.getElementById("portfolio-message"), "Loading your private projects...");
+    try {
+        const projects = await careerApi("/api/portfolio/projects");
+        if (currentUser?.id !== userId) return;
+        if (!Array.isArray(projects)) {
+            throw new Error("The portfolio service returned an unexpected response.");
+        }
+        careerProjects = projects;
+        portfolioAvailable = true;
+        dashboardSources.portfolio = true;
+        renderPortfolioProjects();
+        setMessage(document.getElementById("portfolio-message"), "");
+        renderDashboard();
+        return true;
+    } catch (error) {
+        if (currentUser?.id !== userId) return;
+        careerProjects = [];
+        portfolioAvailable = false;
+        dashboardSources.portfolio = false;
+        renderPortfolioProjects();
+        setMessage(
+            document.getElementById("portfolio-message"),
+            error.message || "Could not load your private portfolio.",
+            "error"
+        );
+        renderDashboard();
+        return false;
+    }
+}
+
+function renderPortfolioProjects() {
+    const list = document.getElementById("portfolio-project-list");
+    list.replaceChildren();
+    careerProjects.forEach((project) => {
+        const card = document.createElement("article");
+        card.className = "portfolio-project-card";
+        const title = document.createElement("h4");
+        title.textContent = project.title;
+        card.appendChild(title);
+
+        const description = document.createElement("p");
+        description.textContent = project.description;
+        card.appendChild(description);
+        if (project.contribution) {
+            const contribution = document.createElement("p");
+            contribution.textContent = `Your contribution: ${project.contribution}`;
+            card.appendChild(contribution);
+        }
+
+        if (Array.isArray(project.skills) && project.skills.length) {
+            const skills = document.createElement("p");
+            skills.className = "learning-resource-meta";
+            skills.textContent = `Self-reported skills: ${project.skills.join(", ")}`;
+            card.appendChild(skills);
+        }
+
+        const dates = [project.started_on, project.completed_on].filter(Boolean);
+        if (dates.length) {
+            const dateLine = document.createElement("p");
+            dateLine.className = "learning-resource-meta";
+            dateLine.textContent = dates.join(" – ");
+            card.appendChild(dateLine);
+        }
+        if (project.project_url) {
+            const link = document.createElement("a");
+            link.href = project.project_url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = "View project";
+            card.appendChild(link);
+        }
+
+        const controls = document.createElement("div");
+        controls.className = "portfolio-project-controls";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.className = "secondary-button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editPortfolioProject(project));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className = "secondary-button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () =>
+            deletePortfolioProject(project, deleteButton)
+        );
+        controls.append(editButton, deleteButton);
+        card.appendChild(controls);
+        list.appendChild(card);
+    });
+    document.getElementById("portfolio-empty").hidden =
+        careerProjects.length > 0 || !portfolioAvailable;
+}
+
+function editPortfolioProject(project) {
+    editingProjectId = project.id;
+    document.getElementById("project-title").value = project.title || "";
+    document.getElementById("project-description").value = project.description || "";
+    document.getElementById("project-contribution").value = project.contribution || "";
+    document.getElementById("project-skills").value =
+        Array.isArray(project.skills) ? project.skills.join(", ") : "";
+    document.getElementById("project-url").value = project.project_url || "";
+    document.getElementById("project-started-on").value = project.started_on || "";
+    document.getElementById("project-completed-on").value = project.completed_on || "";
+    document.getElementById("project-submit").textContent = "Save changes";
+    document.getElementById("project-cancel-edit").hidden = false;
+    document.getElementById("project-title").focus();
+}
+
+async function savePortfolioProject(event) {
+    event.preventDefault();
+    const button = document.getElementById("project-submit");
+    button.disabled = true;
+    const payload = {
+        title: document.getElementById("project-title").value.trim(),
+        description: document.getElementById("project-description").value.trim(),
+        contribution: document.getElementById("project-contribution").value.trim(),
+        skills: document.getElementById("project-skills").value
+            .split(/[,;\n]/).map((skill) => skill.trim()).filter(Boolean),
+        project_url: document.getElementById("project-url").value.trim(),
+        started_on: document.getElementById("project-started-on").value || null,
+        completed_on: document.getElementById("project-completed-on").value || null
+    };
+    const wasEditing = Boolean(editingProjectId);
+    try {
+        const path = editingProjectId
+            ? `/api/portfolio/projects/${encodeURIComponent(editingProjectId)}`
+            : "/api/portfolio/projects";
+        await careerApi(path, {
+            method: editingProjectId ? "PATCH" : "POST",
+            body: JSON.stringify(payload)
+        });
+        resetPortfolioEditor();
+        const projectsLoaded = await loadPortfolioProjects();
+        await loadJobBoard();
+        if (projectsLoaded) {
+            setMessage(
+                document.getElementById("portfolio-message"),
+                wasEditing ? "Your project has been updated." : "Your project has been added.",
+                "success"
+            );
+        }
+    } catch (error) {
+        setMessage(
+            document.getElementById("portfolio-message"),
+            error.message || "Could not save this project.",
+            "error"
+        );
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function deletePortfolioProject(project, button) {
+    if (!window.confirm(`Delete "${project.title}" from your private portfolio?`)) return;
+    button.disabled = true;
+    try {
+        await careerApi(
+            `/api/portfolio/projects/${encodeURIComponent(project.id)}`,
+            { method: "DELETE" }
+        );
+        const projectsLoaded = await loadPortfolioProjects();
+        await loadJobBoard();
+        if (projectsLoaded) {
+            setMessage(document.getElementById("portfolio-message"), "Project deleted.", "success");
+        }
+    } catch (error) {
+        setMessage(
+            document.getElementById("portfolio-message"),
+            error.message || "Could not delete this project.",
+            "error"
+        );
+    } finally {
+        button.disabled = false;
+    }
 }
 
 function renderList(element, values, emptyText) {
@@ -675,76 +2212,1141 @@ function renderList(element, values, emptyText) {
     });
 }
 
-function renderSkillAnalysis(event) {
-    event.preventDefault();
-    const targetRole = document.getElementById("skill-target-role").value.trim();
-    const enteredSkills = document.getElementById("current-skills").value
-        .split(/[,;\n]/).map((skill) => skill.trim()).filter(Boolean);
-    const currentWords = new Set(enteredSkills.flatMap((skill) => [...extractKeywords(skill)]));
-    const targetWords = [...extractKeywords(document.getElementById("skill-job-description").value)];
-    const matched = targetWords.filter((word) => currentWords.has(word));
-    const missing = targetWords.filter((word) => !currentWords.has(word));
-    renderList(document.getElementById("skill-matched"), [...new Set(matched)], "No overlapping terms found yet.");
-    renderList(document.getElementById("skill-missing"), [...new Set(missing)], "No additional terms found.");
-    document.getElementById("skill-result-title").textContent =
-        `Keyword comparison for ${targetRole} · ${new Set(missing).size} terms to explore`;
-    document.getElementById("skill-results").hidden = false;
-    document.getElementById("skill-count").textContent = String(new Set(missing).size);
+function renderDashboard() {
+    const message = document.getElementById("dashboard-message");
+    const profileLoaded = dashboardSources.profile === true;
+    if (!profileLoaded) {
+        document.getElementById("dashboard-profile-completion").textContent =
+            dashboardSources.profile === false ? "Unavailable" : "Loading";
+        document.getElementById("dashboard-profile-detail").textContent =
+            dashboardSources.profile === false
+                ? "Profile data could not be loaded"
+                : "Loading your profile...";
+    }
+
+    const summary = CareerLensDashboardUi.summarizeCareerDashboard({
+        profile: currentCareerProfile,
+        projects: careerProjects,
+        learningPlan,
+        manualApplications: currentApplications,
+        careerApplications: seekerApplications,
+        recommendations: currentJobListings,
+        learningAvailable: dashboardSources.learning === true,
+        portfolioAvailable: portfolioAvailable && dashboardSources.portfolio === true
+    });
+
+    if (profileLoaded) {
+        document.getElementById("dashboard-profile-completion").textContent =
+            `${summary.profile.completeness}%`;
+        document.getElementById("dashboard-profile-detail").textContent =
+            `${summary.profile.completeFields} of ${summary.profile.totalFields} fields complete`;
+    }
+    document.getElementById("dashboard-project-count").textContent =
+        dashboardSources.portfolio === null
+            ? "Loading"
+            : portfolioAvailable ? String(summary.projects.count) : "Unavailable";
+    document.getElementById("dashboard-project-skills").textContent =
+        dashboardSources.portfolio === null
+            ? "Loading your private projects..."
+            : portfolioAvailable
+            ? `${summary.profile.projectSkillsCount} distinct user-listed skills`
+            : "Portfolio setup required";
+    document.getElementById("dashboard-learning-count").textContent =
+        dashboardSources.learning === null
+            ? "Loading"
+            : dashboardSources.learning === false
+                ? "Unavailable"
+                : String(summary.learning.total);
+    document.getElementById("dashboard-learning-detail").textContent =
+        dashboardSources.learning === null
+            ? "Loading your learning plan..."
+            : dashboardSources.learning === false
+                ? "Learning data could not be loaded"
+                : `${summary.learning.inProgress} in progress · ${summary.learning.completed} self-reported completed`;
+
+    const applicationsLoaded = dashboardSources.manualApplications === true
+        && dashboardSources.careerApplications === true;
+    const applicationsLoading = dashboardSources.manualApplications === null
+        || dashboardSources.careerApplications === null;
+    document.getElementById("dashboard-application-count").textContent =
+        applicationsLoaded
+            ? String(summary.applications.manual.total + summary.applications.careerLens.total)
+            : applicationsLoading ? "Loading" : "Unavailable";
+    document.getElementById("dashboard-application-detail").textContent =
+        applicationsLoaded
+            ? `Manual: ${summary.applications.manual.total} total, ${summary.applications.manual.inProgress} active, ${summary.applications.manual.interviews} interviews, ${summary.applications.manual.offers} offers · CareerLens: ${summary.applications.careerLens.total} total, ${summary.applications.careerLens.inProgress} active, ${summary.applications.careerLens.interviews} interviews, ${summary.applications.careerLens.offers} offers · ${summary.profile.linkedResumeCount} linked private résumés`
+            : applicationsLoading
+                ? "Loading application data..."
+                : "One or more application sources could not be loaded";
+
+    const actionsList = document.getElementById("dashboard-actions");
+    actionsList.replaceChildren();
+    const actions = profileLoaded
+        ? CareerLensDashboardUi.getCareerNextActions(summary)
+        : [];
+    actions.forEach((action) => {
+        const item = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = action.href;
+        link.textContent = action.label;
+        const detail = document.createElement("p");
+        detail.textContent = action.detail;
+        item.append(link, detail);
+        actionsList.appendChild(item);
+    });
+    document.getElementById("dashboard-actions-empty").hidden =
+        actions.length > 0 || dashboardSources.profile !== true;
+
+    const recommendations = document.getElementById("dashboard-recommendations");
+    recommendations.replaceChildren();
+    summary.recommendations.forEach((job) => {
+        const card = document.createElement("article");
+        card.className = "dashboard-recommendation-card";
+        const title = document.createElement("h4");
+        title.textContent = job.title || "Published role";
+        const company = document.createElement("p");
+        company.textContent = [job.company, job.location].filter(Boolean).join(" · ");
+        const explanation = document.createElement("p");
+        explanation.textContent = job.match.score === null
+            ? "Add profile or project evidence to see an alignment indicator."
+            : `${job.match.score}% evidence alignment · Not a measure of competence or hiring probability`;
+        const link = document.createElement("a");
+        link.href = "#browse-jobs";
+        link.textContent = "Review opportunity";
+        card.append(title, company, explanation, link);
+        recommendations.appendChild(card);
+    });
+    const recommendationEmpty = document.getElementById("dashboard-recommendations-empty");
+    recommendationEmpty.hidden = summary.recommendations.length > 0;
+    recommendationEmpty.textContent =
+        dashboardSources.recommendations === null
+            ? "Loading recommendations..."
+            : dashboardSources.recommendations === false
+                ? "Recommendations could not be loaded. Open the job board to see the service error."
+                : "No published opportunities are available to recommend yet.";
+
+    const projectList = document.getElementById("dashboard-projects");
+    projectList.replaceChildren();
+    summary.projects.recent.forEach((project) => {
+        const card = document.createElement("article");
+        card.className = "dashboard-project-card";
+        const title = document.createElement("h4");
+        title.textContent = project.title || "Portfolio project";
+        const skills = document.createElement("p");
+        const projectSkills = Array.isArray(project.skills) ? project.skills : [];
+        skills.textContent = projectSkills.length
+            ? `User-listed skills: ${projectSkills.join(", ")}`
+            : "No skills listed";
+        const link = document.createElement("a");
+        link.href = "#my-profile";
+        link.textContent = "Edit portfolio";
+        card.append(title, skills, link);
+        projectList.appendChild(card);
+    });
+    const projectEmpty = document.getElementById("dashboard-projects-empty");
+    projectEmpty.hidden = summary.projects.recent.length > 0;
+    projectEmpty.textContent = dashboardSources.portfolio === null
+        ? "Loading your projects..."
+        : dashboardSources.portfolio === false
+            ? "Portfolio projects could not be loaded. Check the portfolio setup message in My Profile."
+            : "Add a project to see recent contributions and user-listed skills here.";
+
+    const sourceErrors = [];
+    if (dashboardSources.portfolio === false) {
+        sourceErrors.push("portfolio setup or data unavailable");
+    }
+    if (dashboardSources.learning === false) sourceErrors.push("learning data unavailable");
+    if (dashboardSources.profile === false) sourceErrors.push("profile data unavailable");
+    if (
+        dashboardSources.manualApplications === false
+        || dashboardSources.careerApplications === false
+    ) sourceErrors.push("application data unavailable");
+    if (dashboardSources.recommendations === false) {
+        sourceErrors.push("recommendations unavailable");
+    }
+    setMessage(
+        message,
+        sourceErrors.length ? `Dashboard data: ${sourceErrors.join("; ")}.` : ""
+    );
 }
 
-function renderCoachGuidance(question) {
-    const text = question.toLowerCase();
-    let heading = "Turn your goal into a small next step";
-    let steps = [
-        "Write down the outcome you want and a realistic date for it.",
-        "Choose one action you can complete in the next 30 minutes.",
-        "Ask someone you trust for feedback, then adjust your plan."
-    ];
-    if (text.includes("interview")) {
-        heading = "Prepare for your next interview";
-        steps = [
-            "Choose three examples that show your impact; structure each as situation, action, and result.",
-            "Review the role requirements and prepare one specific example for each important skill.",
-            "Prepare two thoughtful questions about the team, success measures, or first 90 days.",
-            "Practice concise answers aloud and keep your examples truthful and specific."
-        ];
-    } else if (text.includes("resume")) {
-        heading = "Make your resume clearer and more relevant";
-        steps = [
-            "Start each experience bullet with a clear action and explain the result.",
-            "Prioritize evidence that matches the role; include numbers only when you can support them.",
-            "Use consistent dates, headings, and formatting that are easy to scan.",
-            "Compare your resume with one target job description and tailor it honestly."
-        ];
-    } else if (text.includes("learning") || text.includes("skill")) {
-        heading = "Build a focused learning plan";
-        steps = [
-            "Pick one high-priority skill that appears in the roles you want.",
-            "Choose a small project where you can practice the skill and produce a visible result.",
-            "Set a weekly practice time and a finish date for the project.",
-            "Ask a knowledgeable person to review your work and identify the next gap."
-        ];
-    } else if (text.includes("career") || text.includes("move") || text.includes("plan")) {
-        heading = "Plan your next career move";
-        steps = [
-            "List the work you want more of, the work you want less of, and your non-negotiables.",
-            "Compare two realistic role options against those priorities.",
-            "Speak with someone doing the work to test your assumptions.",
-            "Choose one low-risk experiment—such as a project, course, or informational interview."
-        ];
-    }
-    const answer = document.getElementById("coach-answer");
-    answer.replaceChildren();
-    const title = document.createElement("h3");
-    title.textContent = heading;
-    const list = document.createElement("ol");
-    steps.forEach((step) => {
-        const item = document.createElement("li");
-        item.textContent = step;
-        list.appendChild(item);
+async function careerApi(path, options = {}) {
+    const { data: { session }, error } = await supabaseClient.auth.getSession();
+    if (error) throw error;
+    if (!session) throw new Error("Your session has expired. Please sign in again.");
+
+    const headers = { Authorization: `Bearer ${session.access_token}` };
+    if (options.body) headers["Content-Type"] = "application/json";
+    const response = await fetch(path, {
+        ...options,
+        headers: { ...headers, ...(options.headers || {}) }
     });
-    answer.append(title, list);
-    answer.hidden = false;
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "The request could not be completed.");
+    return payload;
+}
+
+async function loadCommunityFeed() {
+    const message = document.getElementById("community-message");
+    setMessage(message, "Loading Community conversations...");
+    try {
+        communityPosts = await careerApi("/api/community/posts");
+        if (!Array.isArray(communityPosts)) throw new Error("Community returned an unexpected response.");
+        setMessage(message, "");
+        renderCommunityFeed();
+    } catch (error) {
+        communityPosts = [];
+        setMessage(message, error.message || "Could not load Community.", "error");
+        renderCommunityFeed();
+    }
+}
+
+function formatCommunityDate(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "Recently";
+    return new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "numeric",
+        year: date.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined
+    }).format(date);
+}
+
+function communityReactionCount(post, reaction) {
+    return post.reactions.filter((item) => item.reaction === reaction).length;
+}
+
+function communityUserReacted(post, reaction) {
+    return post.reactions.some((item) =>
+        item.reaction === reaction && item.user_id === currentUser?.id
+    );
+}
+
+function renderCommunityFeed() {
+    const feed = document.getElementById("community-feed");
+    const empty = document.getElementById("community-empty");
+    const search = document.getElementById("community-search").value.trim().toLowerCase();
+    const category = document.getElementById("community-category-filter").value;
+    const feedFilter = document.getElementById("community-feed-filter").value;
+
+    let filtered = communityPosts.filter((post) => {
+        const matchesCategory = category === "all" || post.category === category;
+        const haystack = `${post.title} ${post.body} ${post.category} ${post.author_name}`.toLowerCase();
+        const matchesSearch = !search || haystack.includes(search);
+        const matchesSaved = feedFilter !== "saved" || post.is_saved;
+        const matchesMine = feedFilter !== "mine" || post.author_id === currentUser?.id;
+        return matchesCategory && matchesSearch && matchesSaved && matchesMine;
+    });
+
+    if (feedFilter === "discussed") {
+        filtered = [...filtered].sort((a, b) => b.comments.length - a.comments.length);
+    }
+
+    feed.replaceChildren();
+    empty.hidden = filtered.length > 0;
+    filtered.forEach((post) => feed.appendChild(createCommunityPostCard(post)));
+}
+
+function createCommunityPostCard(post) {
+    const card = document.createElement("article");
+    card.className = "community-post";
+    card.dataset.postId = post.id;
+
+    const header = document.createElement("div");
+    header.className = "community-post-header";
+    const badges = document.createElement("div");
+    badges.className = "community-post-badges";
+    const category = document.createElement("span");
+    category.className = "community-category";
+    category.textContent = post.category;
+    badges.appendChild(category);
+    if (post.is_pinned) {
+        const pinned = document.createElement("span");
+        pinned.className = "community-pinned";
+        pinned.textContent = "Pinned";
+        badges.appendChild(pinned);
+    }
+    if (post.status === "closed") {
+        const closed = document.createElement("span");
+        closed.className = "community-closed";
+        closed.textContent = "Closed";
+        badges.appendChild(closed);
+    }
+    header.appendChild(badges);
+
+    if (post.author_id === currentUser?.id) {
+        const ownerActions = document.createElement("div");
+        ownerActions.className = "community-owner-actions";
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.className = "community-text-button";
+        edit.textContent = "Edit";
+        edit.addEventListener("click", () => openCommunityEditor(post));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "community-text-button danger";
+        remove.textContent = "Delete";
+        remove.addEventListener("click", () => deleteCommunityPost(post.id));
+        ownerActions.append(edit, remove);
+        header.appendChild(ownerActions);
+    }
+
+    const title = document.createElement("h2");
+    title.textContent = post.title;
+    const body = document.createElement("p");
+    body.className = "community-post-body";
+    body.textContent = post.body;
+
+    const author = document.createElement("div");
+    author.className = "community-author";
+    const avatar = document.createElement("span");
+    avatar.className = "community-avatar";
+    avatar.textContent = (post.author_name || "CM").trim().slice(0, 2).toUpperCase();
+    const authorText = document.createElement("span");
+    const authorName = document.createElement("strong");
+    authorName.textContent = post.author_name || "CareerLens member";
+    const authorMeta = document.createElement("small");
+    authorMeta.textContent = `${post.author_type === "job_provider" ? "Employer" : "Job seeker"} · ${formatCommunityDate(post.created_at)}`;
+    authorText.append(authorName, authorMeta);
+    author.append(avatar, authorText);
+
+    const actions = document.createElement("div");
+    actions.className = "community-actions";
+    ["helpful", "insightful", "congrats"].forEach((reaction) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "community-reaction";
+        button.classList.toggle("active", communityUserReacted(post, reaction));
+        const label = reaction === "congrats" ? "Celebrate" : reaction[0].toUpperCase() + reaction.slice(1);
+        button.textContent = `${label} ${communityReactionCount(post, reaction)}`;
+        button.disabled = post.status === "closed";
+        button.addEventListener("click", () => toggleCommunityReaction(post, reaction));
+        actions.appendChild(button);
+    });
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "community-save";
+    save.textContent = post.is_saved ? "Saved" : "Save";
+    save.classList.toggle("active", post.is_saved);
+    save.addEventListener("click", () => toggleCommunitySavedPost(post));
+    actions.appendChild(save);
+
+    const comments = document.createElement("section");
+    comments.className = "community-comments";
+    const commentsHeading = document.createElement("h3");
+    commentsHeading.textContent = `${post.comments.length} ${post.comments.length === 1 ? "reply" : "replies"}`;
+    comments.appendChild(commentsHeading);
+    post.comments.forEach((comment) => {
+        const item = document.createElement("div");
+        item.className = "community-comment";
+        const commentAvatar = document.createElement("span");
+        commentAvatar.className = "community-comment-avatar";
+        commentAvatar.textContent = (comment.author_name || "CM").trim().slice(0, 2).toUpperCase();
+        const commentBody = document.createElement("div");
+        const commentMeta = document.createElement("div");
+        commentMeta.className = "community-comment-meta";
+        const commentName = document.createElement("strong");
+        commentName.textContent = comment.author_name || "CareerLens member";
+        const commentDate = document.createElement("span");
+        commentDate.textContent = formatCommunityDate(comment.created_at);
+        commentMeta.append(commentName, commentDate);
+        const commentText = document.createElement("p");
+        commentText.textContent = comment.body;
+        commentBody.append(commentMeta, commentText);
+        if (comment.author_id === currentUser?.id) {
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "community-text-button danger";
+            remove.textContent = "Delete";
+            remove.addEventListener("click", () => deleteCommunityComment(comment.id));
+            commentBody.appendChild(remove);
+        }
+        item.append(commentAvatar, commentBody);
+        comments.appendChild(item);
+    });
+
+    if (post.status === "open") {
+        const form = document.createElement("form");
+        form.className = "community-comment-form";
+        const input = document.createElement("textarea");
+        input.rows = 2;
+        input.maxLength = 2000;
+        input.required = true;
+        input.placeholder = "Add a constructive reply...";
+        const button = document.createElement("button");
+        button.type = "submit";
+        button.className = "secondary-button";
+        button.textContent = "Reply";
+        form.append(input, button);
+        form.addEventListener("submit", (event) => {
+            event.preventDefault();
+            submitCommunityComment(post.id, input.value, button);
+        });
+        comments.appendChild(form);
+    } else {
+        const closed = document.createElement("p");
+        closed.className = "community-comment-closed";
+        closed.textContent = "This post is closed to new replies.";
+        comments.appendChild(closed);
+    }
+
+    card.append(header, title, body, author, actions, comments);
+    return card;
+}
+
+function openCommunityEditor(post) {
+    editingCommunityPostId = post.id;
+    document.getElementById("community-composer").hidden = false;
+    document.getElementById("community-post-title").value = post.title;
+    document.getElementById("community-post-category").value = post.category;
+    document.getElementById("community-post-body").value = post.body;
+    document.getElementById("community-post-submit").textContent = "Save changes";
+    document.getElementById("community-composer").scrollIntoView({ block: "center" });
+}
+
+function closeCommunityEditor() {
+    editingCommunityPostId = null;
+    document.getElementById("community-composer").reset();
+    document.getElementById("community-composer").hidden = true;
+    document.getElementById("community-post-submit").textContent = "Publish post";
+}
+
+async function submitCommunityPost(event) {
+    event.preventDefault();
+    const submit = document.getElementById("community-post-submit");
+    const wasEditing = Boolean(editingCommunityPostId);
+    const payload = {
+        title: document.getElementById("community-post-title").value,
+        category: document.getElementById("community-post-category").value,
+        body: document.getElementById("community-post-body").value
+    };
+    submit.disabled = true;
+    try {
+        if (editingCommunityPostId) {
+            await careerApi(`/api/community/posts/${encodeURIComponent(editingCommunityPostId)}`, {
+                method: "PATCH",
+                body: JSON.stringify(payload)
+            });
+        } else {
+            await careerApi("/api/community/posts", {
+                method: "POST",
+                body: JSON.stringify(payload)
+            });
+        }
+        closeCommunityEditor();
+        setMessage(document.getElementById("community-message"), wasEditing ? "Post updated." : "Your post has been published.", "success");
+        await loadCommunityFeed();
+    } catch (error) {
+        setMessage(document.getElementById("community-message"), error.message || "Could not publish the post.", "error");
+    } finally {
+        submit.disabled = false;
+    }
+}
+
+async function deleteCommunityPost(postId) {
+    if (!window.confirm("Delete this Community post? This will also remove its replies and reactions.")) return;
+    try {
+        await careerApi(`/api/community/posts/${encodeURIComponent(postId)}`, { method: "DELETE" });
+        setMessage(document.getElementById("community-message"), "Post deleted.", "success");
+        await loadCommunityFeed();
+    } catch (error) {
+        setMessage(document.getElementById("community-message"), error.message || "Could not delete the post.", "error");
+    }
+}
+
+async function submitCommunityComment(postId, body, button) {
+    if (!body.trim()) return;
+    button.disabled = true;
+    try {
+        await careerApi(`/api/community/posts/${encodeURIComponent(postId)}/comments`, {
+            method: "POST",
+            body: JSON.stringify({ body })
+        });
+        await loadCommunityFeed();
+    } catch (error) {
+        setMessage(document.getElementById("community-message"), error.message || "Could not add the reply.", "error");
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function deleteCommunityComment(commentId) {
+    if (!window.confirm("Delete this reply?")) return;
+    try {
+        await careerApi(`/api/community/comments/${encodeURIComponent(commentId)}`, { method: "DELETE" });
+        await loadCommunityFeed();
+    } catch (error) {
+        setMessage(document.getElementById("community-message"), error.message || "Could not delete the reply.", "error");
+    }
+}
+
+async function toggleCommunityReaction(post, reaction) {
+    const reacted = communityUserReacted(post, reaction);
+    try {
+        await careerApi(
+            reacted
+                ? `/api/community/posts/${encodeURIComponent(post.id)}/reactions/${encodeURIComponent(reaction)}`
+                : `/api/community/posts/${encodeURIComponent(post.id)}/reactions`,
+            {
+                method: reacted ? "DELETE" : "POST",
+                body: reacted ? undefined : JSON.stringify({ reaction })
+            }
+        );
+        await loadCommunityFeed();
+    } catch (error) {
+        setMessage(document.getElementById("community-message"), error.message || "Could not update the reaction.", "error");
+    }
+}
+
+async function toggleCommunitySavedPost(post) {
+    try {
+        await careerApi(
+            `/api/community/posts/${encodeURIComponent(post.id)}/saved`,
+            { method: post.is_saved ? "DELETE" : "POST" }
+        );
+        await loadCommunityFeed();
+    } catch (error) {
+        setMessage(document.getElementById("community-message"), error.message || "Could not update the saved post.", "error");
+    }
+}
+
+async function loadLearningWorkspace() {
+    const message = document.getElementById("learning-message");
+    const userId = currentUser?.id;
+    document.getElementById("learning-catalogue-empty").hidden = true;
+    document.getElementById("learning-plan-empty").hidden = true;
+    setMessage(message, "Loading the resource catalogue and your learning plan...");
+    try {
+        const [resources, plan] = await Promise.all([
+            careerApi("/api/learning/resources"),
+            careerApi("/api/learning/plan")
+        ]);
+        if (currentUser?.id !== userId) return;
+        if (!Array.isArray(resources) || !Array.isArray(plan)) {
+            throw new Error("The learning service returned an unexpected response.");
+        }
+        learningResources = resources;
+        learningPlan = plan;
+        dashboardSources.learning = true;
+        renderLearningWorkspace();
+        setMessage(message, "");
+    } catch (error) {
+        learningResources = [];
+        learningPlan = [];
+        dashboardSources.learning = false;
+        renderLearningWorkspace();
+        renderDashboard();
+        setMessage(message, error.message || "Could not load the learning workspace.", "error");
+    }
+}
+
+function createLearningResourceCard(
+    resource,
+    { matchedSkills = [], showAdd = true, feedbackMessageId = "learning-message" } = {}
+) {
+    const card = document.createElement("article");
+    card.className = "learning-resource-card";
+
+    const heading = document.createElement("div");
+    heading.className = "learning-resource-heading";
+    const title = document.createElement("h4");
+    title.textContent = resource.title || "Learning resource";
+    const difficulty = document.createElement("span");
+    difficulty.className = "learning-resource-difficulty";
+    difficulty.textContent = resource.difficulty || "Level not listed";
+    heading.append(title, difficulty);
+    card.appendChild(heading);
+
+    const categoryName = resource.category?.name || "Uncategorized";
+    const meta = document.createElement("p");
+    meta.className = "learning-resource-meta";
+    meta.textContent = [resource.provider, categoryName, resource.resource_type]
+        .filter(Boolean).join(" · ");
+    card.appendChild(meta);
+
+    const description = document.createElement("p");
+    description.className = "learning-resource-description";
+    description.textContent = resource.description || "";
+    card.appendChild(description);
+
+    if (Array.isArray(resource.objectives) && resource.objectives.length) {
+        const objectives = document.createElement("p");
+        objectives.className = "learning-resource-objectives";
+        objectives.textContent = `Learning objectives: ${resource.objectives.join("; ")}`;
+        card.appendChild(objectives);
+    }
+
+    const tags = document.createElement("ul");
+    tags.className = "learning-resource-tags";
+    (resource.skill_tags || []).forEach((tag) => {
+        const item = document.createElement("li");
+        item.textContent = tag;
+        tags.appendChild(item);
+    });
+    if (tags.childElementCount) card.appendChild(tags);
+
+    if (matchedSkills.length) {
+        const matchNote = document.createElement("p");
+        matchNote.className = "learning-resource-meta";
+        matchNote.textContent = `Matches skills to investigate: ${matchedSkills.join(", ")}`;
+        card.appendChild(matchNote);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "learning-resource-actions";
+    let resourceUrl;
+    try {
+        resourceUrl = new URL(resource.resource_url);
+    } catch {
+        resourceUrl = null;
+    }
+    if (resourceUrl && ["http:", "https:"].includes(resourceUrl.protocol)) {
+        const link = document.createElement("a");
+        link.className = "learning-resource-link";
+        link.href = resourceUrl.href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "Open original resource";
+        actions.appendChild(link);
+    } else {
+        const unavailable = document.createElement("span");
+        unavailable.className = "learning-resource-meta";
+        unavailable.textContent = "Resource link unavailable.";
+        actions.appendChild(unavailable);
+    }
+
+    if (showAdd) {
+        const inPlan = learningPlan.some((item) => item.resource_id === resource.id);
+        const addButton = document.createElement("button");
+        addButton.className = "primary-button";
+        addButton.type = "button";
+        addButton.disabled = inPlan;
+        addButton.textContent = inPlan ? "In your plan" : "Add to learning plan";
+        addButton.addEventListener("click", () =>
+            addLearningResource(resource.id, addButton, feedbackMessageId, resource)
+        );
+        actions.appendChild(addButton);
+    }
+    card.appendChild(actions);
+    return card;
+}
+
+function renderLearningRecommendations(result) {
+    const matches = latestLearningRecommendations || [];
+    const dashboardList = document.getElementById("learning-recommendations-list");
+    const analysisList = document.getElementById("skill-learning-list");
+    const dashboardEmpty = document.getElementById("learning-recommendations-empty");
+    const analysisEmpty = document.getElementById("skill-learning-empty");
+    dashboardEmpty.classList.remove("error", "success");
+    analysisEmpty.classList.remove("error", "success");
+    dashboardList.replaceChildren();
+    analysisList.replaceChildren();
+    matches.forEach((resource) => {
+        const matchedSkills = resource.matched_skills || [];
+        dashboardList.appendChild(createLearningResourceCard(resource, { matchedSkills }));
+        analysisList.appendChild(createLearningResourceCard(resource, {
+            matchedSkills,
+            feedbackMessageId: "skill-learning-message"
+        }));
+    });
+    if (!result) {
+        dashboardEmpty.hidden = false;
+        dashboardEmpty.textContent =
+            "Run Skill Gap Analysis to see resource recommendations connected to that analysis. The result is kept for this browser session only.";
+        analysisEmpty.hidden = false;
+        analysisEmpty.textContent = "Run Skill Gap Analysis to connect requirements with learning resources.";
+    } else if (learningRecommendationError) {
+        dashboardEmpty.hidden = false;
+        dashboardEmpty.textContent = learningRecommendationError;
+        dashboardEmpty.classList.add("error");
+        analysisEmpty.hidden = false;
+        analysisEmpty.textContent = learningRecommendationError;
+        analysisEmpty.classList.add("error");
+    } else if (latestLearningRecommendations === null) {
+        dashboardEmpty.hidden = false;
+        dashboardEmpty.textContent = "Finding resources that match the skills from your analysis...";
+        analysisEmpty.hidden = false;
+        analysisEmpty.textContent = "Finding matching learning resources...";
+    } else {
+        dashboardEmpty.hidden = matches.length > 0;
+        dashboardEmpty.textContent = "No matching catalogue resources are available for this analysis yet.";
+        analysisEmpty.hidden = matches.length > 0;
+        analysisEmpty.textContent = "No matching catalogue resources are available for this analysis yet.";
+    }
+}
+
+async function loadLearningRecommendations(result) {
+    latestLearningRecommendations = null;
+    learningRecommendationError = "";
+    renderLearningRecommendations(result);
+    try {
+        const recommendations = await careerApi("/api/learning/recommendations", {
+            method: "POST",
+            body: JSON.stringify({
+                skills: result.skills.map(({ name, status }) => ({ name, status }))
+            })
+        });
+        if (latestSkillGapResult !== result) return;
+        if (!Array.isArray(recommendations)) {
+            throw new Error("The recommendation service returned an unexpected response.");
+        }
+        latestLearningRecommendations = recommendations;
+        renderLearningRecommendations(result);
+    } catch (error) {
+        if (latestSkillGapResult !== result) return;
+        learningRecommendationError = error.message || "Could not load learning recommendations.";
+        renderLearningRecommendations(result);
+    }
+}
+
+function renderLearningWorkspace() {
+    const total = learningPlan.length;
+    const inProgress = learningPlan.filter((item) => item.status === "in_progress").length;
+    const completed = learningPlan.filter((item) => item.status === "completed").length;
+    document.getElementById("learning-total-count").textContent = String(total);
+    document.getElementById("learning-in-progress-count").textContent = String(inProgress);
+    document.getElementById("learning-completed-count").textContent = String(completed);
+    document.getElementById("learning-completion-rate").textContent =
+        total ? `${Math.round(completed / total * 100)}%` : "--";
+
+    const groups = CareerLensLearningUi.groupLearningPlan(learningPlan);
+    [
+        ["in_progress", "learning-in-progress-list", "learning-in-progress-empty", "learning-in-progress-section"],
+        ["completed", "learning-completed-list", "learning-completed-empty", "learning-completed-section"],
+        ["not_started", "learning-not-started-list", "learning-not-started-empty", "learning-not-started-section"]
+    ].forEach(([status, listId, emptyId, sectionId]) => {
+        const list = document.getElementById(listId);
+        list.replaceChildren();
+        groups[status].forEach((item) => list.appendChild(createLearningPlanCard(item)));
+        document.getElementById(emptyId).hidden = groups[status].length > 0;
+        document.getElementById(sectionId).hidden = groups[status].length === 0;
+    });
+    document.getElementById("learning-plan-empty").hidden = total > 0;
+
+    const targetedSkills = CareerLensLearningUi.getLearningPlanSkills(learningPlan);
+    const skillsList = document.getElementById("learning-targeted-skills");
+    skillsList.replaceChildren();
+    targetedSkills.forEach((skill) => {
+        const tag = document.createElement("li");
+        tag.textContent = skill;
+        skillsList.appendChild(tag);
+    });
+    document.getElementById("learning-targeted-skills-empty").hidden =
+        targetedSkills.length > 0;
+
+    const categoryFilter = document.getElementById("learning-category-filter");
+    const selectedCategory = categoryFilter.value || "all";
+    const categories = new Map();
+    learningResources.forEach((resource) => {
+        if (resource.category?.slug && resource.category?.name) {
+            categories.set(resource.category.slug, resource.category.name);
+        }
+    });
+    categoryFilter.replaceChildren(new Option("All categories", "all"));
+    [...categories.entries()].sort((first, second) =>
+        first[1].localeCompare(second[1])
+    ).forEach(([slug, name]) => categoryFilter.add(new Option(name, slug)));
+    categoryFilter.value = categories.has(selectedCategory) ? selectedCategory : "all";
+
+    const filteredResources = CareerLensLearningUi.filterLearningResources(
+        learningResources,
+        {
+            query: document.getElementById("learning-search").value,
+            category: categoryFilter.value,
+            difficulty: document.getElementById("learning-difficulty-filter").value
+        }
+    );
+
+    const resourceList = document.getElementById("learning-resource-list");
+    resourceList.replaceChildren();
+    filteredResources.forEach((resource) =>
+        resourceList.appendChild(createLearningResourceCard(resource))
+    );
+    document.getElementById("learning-resource-count").textContent =
+        learningResources.length
+            ? `Showing ${filteredResources.length} of ${learningResources.length} resources`
+            : "";
+    const catalogueEmpty = document.getElementById("learning-catalogue-empty");
+    catalogueEmpty.hidden = filteredResources.length > 0;
+    if (learningResources.length && !filteredResources.length) {
+        catalogueEmpty.textContent = "No resources match these filters. Try another search or category.";
+    } else {
+        catalogueEmpty.textContent =
+            "No learning resources are available yet. Ask the project administrator to add verified resources to the catalogue.";
+    }
+
+    renderLearningRecommendations(latestSkillGapResult);
+    renderDashboard();
+}
+
+function createLearningPlanCard(item) {
+    const resource = item.resource || {
+        title: "Resource no longer available",
+        description: "This catalogue item is unavailable. You can remove it from your plan.",
+        skill_tags: []
+    };
+    const card = createLearningResourceCard(resource, { showAdd: false });
+    const status = document.createElement("span");
+    status.className = "learning-resource-meta";
+    status.textContent = item.status === "completed"
+        ? "Self-reported as completed"
+        : item.status === "in_progress" ? "In progress" : "Not started";
+    card.insertBefore(status, card.lastElementChild);
+    const updated = document.createElement("p");
+    updated.className = "learning-resource-meta";
+    const updatedAt = item.updated_at || item.created_at;
+    updated.textContent = `Last updated: ${CareerLensLearningUi.formatLearningDate(updatedAt)}`;
+    card.insertBefore(updated, card.lastElementChild);
+
+    const controls = document.createElement("div");
+    controls.className = "learning-plan-controls";
+    const statusLabel = document.createElement("label");
+    statusLabel.textContent = "Progress";
+    const statusSelect = document.createElement("select");
+    statusSelect.setAttribute("aria-label", `Progress for ${resource.title || "learning resource"}`);
+    [
+        ["not_started", "Not started"],
+        ["in_progress", "In progress"],
+        ["completed", "Completed (self-reported)"]
+    ].forEach(([value, label]) => {
+        const option = new Option(label, value);
+        option.selected = item.status === value;
+        statusSelect.add(option);
+    });
+    statusLabel.appendChild(statusSelect);
+
+    const dateLabel = document.createElement("label");
+    dateLabel.textContent = "Target date";
+    const dateInput = document.createElement("input");
+    dateInput.type = "date";
+    dateInput.value = item.target_completion_date || "";
+    dateInput.setAttribute("aria-label", `Target completion date for ${resource.title || "learning resource"}`);
+    dateLabel.appendChild(dateInput);
+
+    const saveButton = document.createElement("button");
+    saveButton.className = "secondary-button";
+    saveButton.type = "button";
+    saveButton.textContent = "Save progress";
+    saveButton.addEventListener("click", () =>
+        updateLearningPlanItem(item.id, statusSelect.value, dateInput.value, saveButton)
+    );
+
+    const removeButton = document.createElement("button");
+    removeButton.className = "secondary-button";
+    removeButton.type = "button";
+    removeButton.textContent = "Remove";
+    removeButton.addEventListener("click", () => removeLearningPlanItem(item.id, removeButton));
+    controls.append(statusLabel, dateLabel, saveButton, removeButton);
+    card.appendChild(controls);
+    return card;
+}
+
+async function addLearningResource(
+    resourceId, button, feedbackMessageId, resourceDetails = null
+) {
+    const message = document.getElementById(feedbackMessageId);
+    button.disabled = true;
+    setMessage(message, "Adding resource to your plan...");
+    try {
+        const result = await careerApi("/api/learning/plan", {
+            method: "POST",
+            body: JSON.stringify({ resource_id: resourceId })
+        });
+        if (!Array.isArray(result) || !result[0]) {
+            throw new Error("The resource could not be added to your learning plan.");
+        }
+        const resource = learningResources.find((item) => item.id === resourceId)
+            || resourceDetails;
+        learningPlan = [{ ...result[0], resource }, ...learningPlan];
+        renderLearningWorkspace();
+        button.textContent = "In your plan";
+        setMessage(message, "Resource added to your learning plan.", "success");
+    } catch (error) {
+        setMessage(message, error.message || "Could not add this resource.", "error");
+        button.disabled = false;
+    }
+}
+
+async function updateLearningPlanItem(itemId, status, targetDate, button) {
+    button.disabled = true;
+    try {
+        const result = await careerApi(`/api/learning/plan/${encodeURIComponent(itemId)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ status, target_completion_date: targetDate || null })
+        });
+        if (!Array.isArray(result) || !result[0]) {
+            throw new Error("The learning-plan item could not be updated.");
+        }
+        learningPlan = learningPlan.map((item) => item.id === itemId
+            ? { ...result[0], resource: item.resource }
+            : item);
+        renderLearningWorkspace();
+        setMessage(document.getElementById("learning-message"), "Learning progress saved.", "success");
+    } catch (error) {
+        setMessage(document.getElementById("learning-message"), error.message || "Could not save your learning progress.", "error");
+        button.disabled = false;
+    }
+}
+
+async function removeLearningPlanItem(itemId, button) {
+    button.disabled = true;
+    try {
+        await careerApi(`/api/learning/plan/${encodeURIComponent(itemId)}`, {
+            method: "DELETE"
+        });
+        learningPlan = learningPlan.filter((item) => item.id !== itemId);
+        renderLearningWorkspace();
+        setMessage(document.getElementById("learning-message"), "Resource removed from your learning plan.", "success");
+    } catch (error) {
+        setMessage(document.getElementById("learning-message"), error.message || "Could not remove this resource.", "error");
+        button.disabled = false;
+    }
+}
+
+function renderSkillGapResults(result) {
+    latestSkillGapResult = result;
+    latestLearningRecommendations = null;
+    learningRecommendationError = "";
+    const summary = result.summary;
+    document.getElementById("skill-result-title").textContent =
+        `Recognized requirements for ${result.target_role}`;
+    document.getElementById("skill-total-count").textContent = String(summary.total_required_skills);
+    document.getElementById("skill-evidence-count").textContent =
+        String(summary.skills_with_supporting_evidence);
+    document.getElementById("skill-assessment-count").textContent = String(summary.needs_assessment);
+    document.getElementById("skill-no-evidence-count").textContent = String(summary.no_evidence_found);
+    document.getElementById("skill-gap-note").textContent = result.note;
+    const priorityPanel = document.getElementById("skill-priority-panel");
+    priorityPanel.hidden = !summary.priority_skills.length;
+    document.getElementById("skill-priority-list").textContent =
+        summary.priority_skills.join(", ");
+
+    const gapList = document.getElementById("skill-gap-list");
+    gapList.replaceChildren();
+    if (!result.skills.length) {
+        gapList.appendChild(createEmptyState(
+            "No supported skills recognized",
+            "The job description did not match a skill in CareerLens’ current vocabulary. Add clear skills or requirements to the description and try again."
+        ));
+    }
+    result.skills.forEach((skill) => {
+        const card = document.createElement("article");
+        card.className = "skill-gap-card";
+        const heading = document.createElement("div");
+        heading.className = "skill-gap-card-heading";
+        const name = document.createElement("h4");
+        name.textContent = skill.name;
+        const status = document.createElement("span");
+        status.className = `skill-evidence-status status-${skill.status.toLowerCase().replaceAll(" ", "-")}`;
+        status.textContent = skill.status;
+        heading.append(name, status);
+        card.appendChild(heading);
+
+        const required = document.createElement("p");
+        required.className = "skill-requirement";
+        required.textContent = `Job requirement: ${skill.requirement_excerpt}`;
+        card.appendChild(required);
+
+        const explanation = document.createElement("p");
+        explanation.textContent = skill.explanation;
+        card.appendChild(explanation);
+
+        if (skill.evidence.length) {
+            const evidenceTitle = document.createElement("strong");
+            evidenceTitle.className = "skill-evidence-title";
+            evidenceTitle.textContent = "Your supplied evidence";
+            const evidenceList = document.createElement("ul");
+            skill.evidence.forEach((evidence) => {
+                const item = document.createElement("li");
+                const source = document.createElement("strong");
+                source.textContent = `${evidence.source}: `;
+                item.append(source, document.createTextNode(evidence.excerpt));
+                evidenceList.appendChild(item);
+            });
+            card.append(evidenceTitle, evidenceList);
+        } else {
+            const noEvidence = document.createElement("p");
+            noEvidence.className = "muted-text";
+            noEvidence.textContent = "No supporting mention was found in the text supplied for this analysis.";
+            card.appendChild(noEvidence);
+        }
+
+        const gap = document.createElement("p");
+        gap.className = "skill-gap-explanation";
+        gap.textContent = skill.gap_explanation;
+        card.appendChild(gap);
+
+        const action = document.createElement("p");
+        action.className = "skill-next-action";
+        const actionLabel = document.createElement("strong");
+        actionLabel.textContent = "Recommended next step: ";
+        action.append(actionLabel, document.createTextNode(skill.next_action));
+        card.appendChild(action);
+
+        if (skill.learning_sequence.length) {
+            const sequence = document.createElement("p");
+            sequence.className = "skill-learning-sequence";
+            sequence.textContent = `Possible learning sequence: ${skill.learning_sequence.join(" → ")}`;
+            card.appendChild(sequence);
+        }
+        gapList.appendChild(card);
+    });
+
+    document.getElementById("skill-count").textContent = String(
+        summary.needs_assessment + summary.no_evidence_found
+    );
+    document.getElementById("skill-results").hidden = false;
+    renderLearningRecommendations(result);
+}
+
+async function renderSkillAnalysis(event) {
+    event.preventDefault();
+    const button = document.getElementById("skill-analyze-button");
+    const message = document.getElementById("skill-message");
+    button.disabled = true;
+    document.getElementById("skill-results").hidden = true;
+    setMessage(message, "Analyzing the job requirements and supplied evidence...");
+    try {
+        const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!session) throw new Error("Your session has expired. Please sign in again.");
+
+        const formData = new FormData(document.getElementById("skill-form"));
+        formData.set("skills", document.getElementById("current-skills").value);
+        const response = await fetch("/api/skill-gap", {
+            method: "POST",
+            headers: { Authorization: ["Bearer", session.access_token].join(" ") },
+            body: formData
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Could not analyze these skills.");
+        renderSkillGapResults(result);
+        setMessage(message, "Skill analysis complete. Review the evidence and correct anything that needs updating.", "success");
+        await loadLearningRecommendations(result);
+    } catch (error) {
+        setMessage(message, error.message || "Could not analyze these skills.", "error");
+    } finally {
+        button.disabled = false;
+    }
+}
+
+function appendCoachFormattedText(element, text) {
+    const parts = text.split(/(\*\*[^*]+\*\*)/g);
+    parts.forEach((part) => {
+        if (part.startsWith("**") && part.endsWith("**")) {
+            const strong = document.createElement("strong");
+            strong.textContent = part.slice(2, -2);
+            element.appendChild(strong);
+        } else if (part) {
+            element.appendChild(document.createTextNode(part));
+        }
+    });
+}
+
+function renderCoachAnswer(answerText) {
+    const content = document.getElementById("coach-answer-content");
+    content.replaceChildren();
+    let paragraphLines = [];
+    let list = null;
+
+    const flushParagraph = () => {
+        if (!paragraphLines.length) return;
+        const paragraph = document.createElement("p");
+        appendCoachFormattedText(paragraph, paragraphLines.join(" "));
+        content.appendChild(paragraph);
+        paragraphLines = [];
+    };
+    const flushList = () => {
+        if (list) content.appendChild(list);
+        list = null;
+    };
+
+    answerText.split(/\r?\n/).forEach((rawLine) => {
+        const line = rawLine.trim();
+        if (!line) {
+            flushParagraph();
+            flushList();
+            return;
+        }
+        const headingMatch = line.match(/^#{1,3}\s+(.+)/);
+        if (headingMatch) {
+            flushParagraph();
+            flushList();
+            const heading = document.createElement("h4");
+            appendCoachFormattedText(heading, headingMatch[1].replace(/\*\*/g, ""));
+            content.appendChild(heading);
+            return;
+        }
+        const listMatch = line.match(/^(?:[-*]\s+|\d+[.)]\s+)(.+)/);
+        if (listMatch) {
+            flushParagraph();
+            const ordered = /^\d+[.)]\s+/.test(line);
+            const listType = ordered ? "ol" : "ul";
+            if (list?.tagName.toLowerCase() !== listType) {
+                flushList();
+                list = document.createElement(listType);
+            }
+            const item = document.createElement("li");
+            appendCoachFormattedText(item, listMatch[1]);
+            list.appendChild(item);
+            return;
+        }
+        flushList();
+        paragraphLines.push(line);
+    });
+    flushParagraph();
+    flushList();
+}
+
+async function submitCareerCoach(event) {
+    event.preventDefault();
+    const question = document.getElementById("coach-question").value.trim();
+    const consent = document.getElementById("coach-consent");
+    const button = document.getElementById("coach-submit");
+    const message = document.getElementById("coach-message");
+    if (!consent.checked) {
+        setMessage(message, "Please confirm before sending your question to Google Gemini.", "error");
+        return;
+    }
+
+    button.disabled = true;
+    document.getElementById("coach-answer").hidden = true;
+    setMessage(message, "Taking a moment to think through your question...");
+    try {
+        const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!session) throw new Error("Your session has expired. Please sign in again.");
+        const response = await fetch("/api/ai-assist", {
+            method: "POST",
+            headers: {
+                Authorization: ["Bearer", session.access_token].join(" "),
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                task: "career_coach",
+                role: "Career guidance",
+                text: question,
+                consent: true
+            })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Could not get career guidance.");
+        if (typeof payload.answer !== "string" || !payload.answer.trim()) {
+            throw new Error("The career coach returned an empty response. Please try again.");
+        }
+        latestCoachAnswer = payload.answer.trim();
+        renderCoachAnswer(latestCoachAnswer);
+        document.getElementById("coach-answer").hidden = false;
+        setMessage(message, "Your guidance is ready.", "success");
+        document.getElementById("coach-answer").scrollIntoView({
+            behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+            block: "nearest"
+        });
+    } catch (error) {
+        setMessage(message, error.message || "Could not get career guidance. Please try again.", "error");
+    } finally {
+        consent.checked = false;
+        button.disabled = false;
+    }
 }
 
 function updatePracticeProgress() {
@@ -924,6 +3526,77 @@ async function submitAIAssist(event) {
     }
 }
 
+async function submitLinkedInSuggestions(event) {
+    event.preventDefault();
+    const button = document.getElementById("linkedin-ai-submit");
+    const consent = document.getElementById("linkedin-ai-consent");
+    const message = document.getElementById("linkedin-ai-message");
+    if (!consent.checked) {
+        setMessage(message, "Confirm consent before sending your profile details to Gemini.", "error");
+        return;
+    }
+
+    button.disabled = true;
+    document.getElementById("linkedin-ai-result").hidden = true;
+    setMessage(message, "Sending the selected professional details to Gemini...");
+    try {
+        const role = [
+            document.getElementById("linkedin-target-role").value,
+            document.getElementById("my-profile-target-role").value,
+            document.getElementById("my-profile-current-role").value
+        ].map((value) => value.trim()).find((value) => value.length >= 2) || "";
+        if (role.length < 2) {
+            throw new Error("Add a current or target role in My Profile or LinkedIn Optimizer first.");
+        }
+
+        const details = [
+            ["Current role", document.getElementById("my-profile-current-role").value],
+            ["Career target role", document.getElementById("my-profile-target-role").value],
+            ["Professional headline", document.getElementById("my-profile-headline").value],
+            ["About summary", document.getElementById("my-profile-about").value],
+            ["Skills", document.getElementById("my-profile-skills").value],
+            ["Education", document.getElementById("my-profile-education").value],
+            ["LinkedIn target role", document.getElementById("linkedin-target-role").value],
+            ["LinkedIn headline draft", document.getElementById("linkedin-headline-draft").value],
+            ["LinkedIn About draft", document.getElementById("linkedin-about-draft").value]
+        ].filter(([, value]) => value.trim());
+        const text = details.map(([label, value]) => `${label}: ${value.trim()}`).join("\n\n");
+        if (text.length < 40) {
+            throw new Error("Add more profile details or LinkedIn draft text before requesting suggestions.");
+        }
+        if (text.length > 8000) {
+            throw new Error("Shorten the selected profile and draft text to 8,000 characters or fewer.");
+        }
+
+        const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!session) throw new Error("Your session has expired. Please sign in again.");
+        const response = await fetch("/api/ai-assist", {
+            method: "POST",
+            headers: {
+                Authorization: ["Bearer", session.access_token].join(" "),
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                task: "linkedin_profile",
+                role,
+                text,
+                consent: consent.checked
+            })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Gemini could not process this request.");
+        document.getElementById("linkedin-ai-answer").textContent = payload.answer;
+        document.getElementById("linkedin-ai-result").hidden = false;
+        setMessage(message, "Suggestions are ready. Review and copy any changes you want to keep.", "success");
+    } catch (error) {
+        setMessage(message, error.message || "Could not get LinkedIn suggestions.", "error");
+    } finally {
+        consent.checked = false;
+        button.disabled = false;
+    }
+}
+
 function downloadInterviewPack() {
     if (!currentInterviewPack) return;
     const lines = [
@@ -1014,7 +3687,42 @@ document.querySelectorAll("[data-auth-mode]").forEach((tab) => {
 authForm.addEventListener("submit", handleAuthSubmit);
 document.getElementById("password-update-form").addEventListener("submit", updatePassword);
 document.getElementById("forgot-password").addEventListener("click", sendPasswordReset);
+document.getElementById("resend-confirmation").addEventListener("click", resendSignupConfirmation);
 document.getElementById("sign-out").addEventListener("click", signOut);
+document.getElementById("community-composer").addEventListener("submit", submitCommunityPost);
+document.getElementById("community-composer-toggle").addEventListener("click", () => {
+    closeCommunityEditor();
+    document.getElementById("community-composer").hidden = false;
+    document.getElementById("community-post-title").focus();
+});
+document.getElementById("community-composer-close").addEventListener("click", closeCommunityEditor);
+document.getElementById("community-search").addEventListener("input", renderCommunityFeed);
+document.getElementById("community-category-filter").addEventListener("change", renderCommunityFeed);
+document.getElementById("community-feed-filter").addEventListener("change", renderCommunityFeed);
+document.getElementById("learning-search").addEventListener("input", renderLearningWorkspace);
+document.getElementById("learning-category-filter").addEventListener("change", renderLearningWorkspace);
+document.getElementById("learning-difficulty-filter").addEventListener("change", renderLearningWorkspace);
+document.getElementById("learning-filter-form").addEventListener("submit", (event) => event.preventDefault());
+document.querySelectorAll("[data-open-job-form]").forEach((button) => {
+    button.addEventListener("click", () => openJobDialog());
+});
+document.getElementById("close-job-dialog").addEventListener("click", () => jobDialog.close());
+jobDialog.addEventListener("close", () => {
+    editingJobId = null;
+    jobForm.reset();
+});
+jobForm.addEventListener("submit", saveJobListing);
+document.getElementById("close-job-application").addEventListener("click", () => jobApplicationDialog.close());
+jobApplicationDialog.addEventListener("close", () => {
+    applyingToJobId = null;
+    jobApplicationForm.reset();
+});
+jobApplicationForm.addEventListener("submit", submitJobApplication);
+document.getElementById("job-search").addEventListener("input", renderJobBoard);
+document.getElementById("job-type-filter").addEventListener("change", renderJobBoard);
+document.getElementById("job-sort").addEventListener("change", renderJobBoard);
+document.getElementById("provider-job-filter").addEventListener("change", renderProviderApplicants);
+document.getElementById("provider-applicant-filter").addEventListener("change", renderProviderApplicants);
 document.getElementById("add-application").addEventListener("click", () => {
     openApplicationDialog();
 });
@@ -1028,28 +3736,66 @@ applicationSearch.addEventListener("input", renderApplications);
 applicationFilter.addEventListener("change", renderApplications);
 document.getElementById("export-applications").addEventListener("click", exportApplications);
 applicationForm.addEventListener("submit", saveApplication);
-document.getElementById("profile-form").addEventListener("submit", saveProfile);
+document.getElementById("profile-form").addEventListener("submit", saveLinkedInDraft);
+document.getElementById("my-profile-form").addEventListener("submit", saveMyProfile);
+document.getElementById("employer-profile-form").addEventListener("submit", saveEmployerProfile);
+document.getElementById("linkedin-ai-form").addEventListener("submit", submitLinkedInSuggestions);
+document.getElementById("portfolio-form").addEventListener("submit", savePortfolioProject);
+document.getElementById("project-cancel-edit").addEventListener("click", resetPortfolioEditor);
 document.getElementById("skill-form").addEventListener("submit", renderSkillAnalysis);
+document.getElementById("skill-job-listing")?.addEventListener("change", fillSkillAnalysisFromJob);
 document.getElementById("ats-form").addEventListener("submit", analyzeResume);
 interviewPrepForm.addEventListener("submit", generateInterviewPack);
 aiAssistForm.addEventListener("submit", submitAIAssist);
 document.getElementById("download-interview-pack").addEventListener("click", downloadInterviewPack);
-document.getElementById("coach-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    renderCoachGuidance(document.getElementById("coach-question").value.trim());
-});
+document.getElementById("coach-form").addEventListener("submit", submitCareerCoach);
 document.querySelectorAll(".coach-prompt").forEach((button) => {
     button.addEventListener("click", () => {
         const input = document.getElementById("coach-question");
         input.value = button.dataset.prompt;
-        renderCoachGuidance(input.value);
+        document.getElementById("coach-consent").checked = false;
+        document.getElementById("coach-message").textContent = "";
+        document.getElementById("coach-answer").hidden = true;
+        input.focus();
     });
+});
+document.getElementById("coach-copy").addEventListener("click", async () => {
+    if (!latestCoachAnswer) return;
+    const button = document.getElementById("coach-copy");
+    try {
+        await navigator.clipboard.writeText(latestCoachAnswer);
+        setMessage(document.getElementById("coach-message"), "Guidance copied to your clipboard.", "success");
+        button.lastChild.textContent = "Copied";
+        window.setTimeout(() => {
+            button.lastChild.textContent = "Copy";
+        }, 1600);
+    } catch (error) {
+        setMessage(document.getElementById("coach-message"), "Could not copy the guidance. You can select and copy it manually.", "error");
+    }
 });
 document.querySelectorAll(".nav-link").forEach((link) => {
-    link.addEventListener("click", () => {
-        document.querySelectorAll(".nav-link").forEach((item) => item.classList.remove("active"));
-        link.classList.add("active");
+    link.addEventListener("click", (event) => {
+        event.preventDefault();
+        if (window.location.hash === link.getAttribute("href")) {
+            activatePageFromHash();
+            return;
+        }
+        window.location.hash = link.getAttribute("href");
     });
 });
+document.querySelectorAll('a[href^="#"]:not(.nav-link)').forEach((link) => {
+    link.addEventListener("click", (event) => {
+        const pageId = link.getAttribute("href").slice(1);
+        if (!document.getElementById(pageId)?.matches("[data-page-view]")) return;
+        event.preventDefault();
+        if (window.location.hash === `#${pageId}`) {
+            activatePageFromHash();
+            return;
+        }
+        window.location.hash = pageId;
+    });
+});
+window.addEventListener("hashchange", activatePageFromHash);
+activatePageFromHash();
 
 setupSupabase();

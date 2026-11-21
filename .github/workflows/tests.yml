@@ -29,5 +29,13 @@ jobs:
       - name: Check JavaScript syntax
         run: node --check backend/static/script.js
 
+      - name: Check UI helper syntax
+        run: |
+          node --check backend/static/dashboard-ui.js
+          node --check backend/static/learning-ui.js
+
+      - name: Run JavaScript tests
+        run: node --test tests/*.cjs
+
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
