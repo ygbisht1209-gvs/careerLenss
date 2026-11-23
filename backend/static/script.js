@@ -39,19 +39,19 @@ let jobMatches = new Map();
 let jobProfileSummary = null;
 let currentJobApplications = [];
 let currentApplicationReviews = new Map();
+let currentApplicantMatches = new Map();
+let currentNotifications = [];
 let seekerApplications = [];
 let editingJobId = null;
 let applyingToJobId = null;
-let latestCoachAnswer = "";
 let learningResources = [];
 let learningPlan = [];
 let latestSkillGapResult = null;
 let latestLearningRecommendations = null;
 let learningRecommendationError = "";
-let communityPosts = [];
-let editingCommunityPostId = null;
 
 function setMessage(element, message, kind = "") {
+    if (!element) return;
     element.textContent = message;
     element.classList.toggle("error", kind === "error");
     element.classList.toggle("success", kind === "success");
@@ -126,6 +126,12 @@ function activatePageFromHash() {
 
 function configureAiTaskOptions() {
     const taskSelect = document.getElementById("ai-task");
+    const taskLabel = document.getElementById("ai-task-label");
+    const tabs = document.querySelector(".ai-assistant-tabs");
+    const isSeeker = currentAccountType === "job_seeker";
+    taskSelect.hidden = isSeeker;
+    taskLabel.hidden = isSeeker;
+    if (tabs) tabs.hidden = !isSeeker;
     const options = [...taskSelect.options];
     options.forEach((option) => {
         option.hidden = Boolean(
@@ -249,11 +255,13 @@ function clearWorkspaceData() {
     latestSkillGapResult = null;
     latestLearningRecommendations = null;
     learningRecommendationError = "";
-    communityPosts = [];
-    editingCommunityPostId = null;
     populateSkillJobListings();
     currentJobApplications = [];
     currentApplicationReviews = new Map();
+    currentApplicantMatches = new Map();
+    currentNotifications = [];
+    const notificationCount = document.getElementById("notification-count");
+    if (notificationCount) notificationCount.hidden = true;
     seekerApplications = [];
     editingJobId = null;
     applyingToJobId = null;
@@ -274,12 +282,6 @@ function clearWorkspaceData() {
     document.getElementById("portfolio-empty").hidden = false;
     resetPortfolioEditor();
     document.getElementById("skill-form").reset();
-    document.getElementById("ats-form").reset();
-    document.getElementById("coach-form").reset();
-    latestCoachAnswer = "";
-    document.getElementById("coach-consent").checked = false;
-    document.getElementById("coach-message").textContent = "";
-    document.getElementById("coach-answer-content").replaceChildren();
     interviewPrepForm.reset();
     aiAssistForm.reset();
     document.getElementById("interview-prep-results").hidden = true;
@@ -287,10 +289,6 @@ function clearWorkspaceData() {
     document.getElementById("ai-assist-result").hidden = true;
     document.getElementById("ai-assist-answer").textContent = "";
     setMessage(document.getElementById("ai-assist-message"), "");
-    document.getElementById("linkedin-ai-form").reset();
-    document.getElementById("linkedin-ai-result").hidden = true;
-    document.getElementById("linkedin-ai-answer").textContent = "";
-    setMessage(document.getElementById("linkedin-ai-message"), "");
     currentInterviewPack = null;
     document.getElementById("profile-name").textContent = "Career Explorer";
     document.getElementById("profile-email").textContent = "Your career workspace";
@@ -311,17 +309,13 @@ function clearWorkspaceData() {
     document.getElementById("skill-job-listing").value = "";
     document.getElementById("profile-stat").textContent = "Build it";
     document.getElementById("skill-count").textContent = "--";
-    document.getElementById("ats-stat").innerHTML = "--<small> / 100</small>";
     document.getElementById("skill-results").hidden = true;
     document.getElementById("skill-gap-list").replaceChildren();
-    document.getElementById("ats-results").hidden = true;
-    document.getElementById("coach-answer").hidden = true;
     setMessage(document.getElementById("app-message"), "");
     setMessage(document.getElementById("profile-message"), "");
     setMessage(document.getElementById("portfolio-message"), "");
     setMessage(document.getElementById("dashboard-message"), "");
     setMessage(document.getElementById("skill-message"), "");
-    setMessage(document.getElementById("ats-message"), "");
     setMessage(document.getElementById("job-board-message"), "");
     setMessage(document.getElementById("provider-jobs-message"), "");
     setMessage(document.getElementById("provider-applicants-message"), "");
@@ -378,7 +372,8 @@ async function openWorkspace(user) {
         configureAiTaskOptions();
         activatePageFromHash();
         if (currentAccountType === "job_provider") {
-            await Promise.all([loadEmployerProfile(), loadProviderWorkspace(), loadCommunityFeed()]);
+            await Promise.all([loadEmployerProfile(), loadProviderWorkspace()]);
+            await loadNotifications();
         } else {
             dashboardSources = {
                 profile: null,
@@ -396,7 +391,7 @@ async function openWorkspace(user) {
                 loadJobBoard(),
                 loadLearningWorkspace(),
                 loadPortfolioProjects(),
-                loadCommunityFeed()
+                loadNotifications(),
             ]);
         }
     } catch (error) {
@@ -575,12 +570,6 @@ function supabaseErrorMessage(error) {
     ) {
         return "The employer profile field is missing. In the same Supabase project configured by backend/.env, run backend/migrations/phase11_employer_profile.sql, then reload CareerLens.";
     }
-    if (
-        /career_profiles\.linkedin_(?:target_role|headline|about)_draft does not exist/i.test(errorText)
-        || /linkedin_(?:target_role|headline|about)_draft.*career_profiles.*schema cache/i.test(errorText)
-    ) {
-        return "Supabase is missing the LinkedIn draft columns. In the same project configured by backend/.env, run the full backend/migrations/phase10_my_profile.sql and confirm it finishes successfully. If it already ran, verify those columns exist on public.career_profiles and that the project matches backend/.env, then reload CareerLens.";
-    }
     if (/user_accounts|job_listings|job_applications|application_reviews|application-resumes|bucket not found/i.test(`${error?.message || ""} ${error?.details || ""}`)) {
         return "CareerLens could not find the latest hiring tables or private résumé storage. In the Supabase project configured in backend/.env, run the latest backend/supabase_schema.sql from the SQL Editor, then reload the app.";
     }
@@ -640,6 +629,19 @@ async function loadProviderWorkspace() {
     currentApplicationReviews = new Map(
         (reviewsResult.data || []).map((review) => [review.application_id, review])
     );
+    currentApplicantMatches = new Map();
+    try {
+        const rankingResult = await careerApi("/api/provider-applicant-rankings");
+        (rankingResult.rankings || []).forEach((ranking) => {
+            currentApplicantMatches.set(ranking.application_id, ranking.match);
+        });
+    } catch (error) {
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            error.message || "Applicant evidence rankings are unavailable.",
+            "error"
+        );
+    }
     renderProviderWorkspace();
 }
 
@@ -701,6 +703,7 @@ async function loadJobBoard() {
         jobProfileSummary = result.profile;
         dashboardSources.recommendations = true;
         populateSkillJobListings();
+        populateApplicationMaterialJobs();
         renderJobBoard();
         const guidance = document.getElementById("job-profile-guidance");
         const missing = jobProfileSummary.missing_fields || [];
@@ -746,6 +749,118 @@ async function loadJobBoard() {
         );
         renderJobBoard();
         renderDashboard();
+    }
+}
+
+function populateApplicationMaterialJobs() {
+    const select = document.getElementById("application-material-job");
+    if (!select) return;
+    const selected = select.value;
+    select.replaceChildren();
+    select.add(new Option("Choose a listing", ""));
+    currentJobListings
+        .filter((job) => job.status === "published")
+        .forEach((job) => select.add(new Option(`${job.title} · ${job.company}`, job.id)));
+    if (currentJobListings.some((job) => job.id === selected)) {
+        select.value = selected;
+    }
+}
+
+async function loadApplicationMaterials(jobId) {
+    const message = document.getElementById("application-material-message");
+    const result = document.getElementById("application-material-result");
+    result.hidden = true;
+    if (!jobId) {
+        setMessage(message, "");
+        return;
+    }
+    setMessage(message, "Loading saved materials...");
+    try {
+        const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!session) throw new Error("Your session has expired. Please sign in again.");
+        const response = await fetch(`/api/application-materials/${encodeURIComponent(jobId)}`, {
+            headers: { Authorization: `Bearer ${session.access_token}` }
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Could not load saved materials.");
+        if (payload) {
+            renderApplicationMaterials(payload);
+            setMessage(message, "Saved draft loaded.", "success");
+        } else {
+            setMessage(message, "No saved draft yet. Generate one for this job.");
+        }
+    } catch (error) {
+        setMessage(message, error.message || "Could not load saved materials.", "error");
+    }
+}
+
+function renderApplicationMaterials(payload) {
+    const job = currentJobListings.find((listing) => listing.id === payload.job_id);
+    document.getElementById("application-material-job-title").textContent =
+        job ? `${job.title} · ${job.company}` : "Selected job";
+    const list = document.getElementById("application-material-bullets");
+    list.replaceChildren();
+    (payload.bullets || []).forEach((bullet) => {
+        const item = document.createElement("li");
+        item.textContent = bullet;
+        list.appendChild(item);
+    });
+    document.getElementById("application-material-cover-letter").textContent =
+        payload.cover_letter || "";
+    document.getElementById("application-material-result").hidden = false;
+}
+
+async function generateApplicationMaterials(event) {
+    event.preventDefault();
+    const jobId = document.getElementById("application-material-job").value;
+    const consent = document.getElementById("application-material-consent");
+    const message = document.getElementById("application-material-message");
+    const button = document.getElementById("application-material-submit");
+    if (!jobId) {
+        setMessage(message, "Choose a published job listing.", "error");
+        return;
+    }
+    if (!consent.checked) {
+        setMessage(message, "Confirm consent before sending the profile and job details to Gemini.", "error");
+        return;
+    }
+    button.disabled = true;
+    setMessage(message, "Using your profile and portfolio evidence to draft application materials...");
+    try {
+        const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+        if (sessionError) throw sessionError;
+        if (!session) throw new Error("Your session has expired. Please sign in again.");
+        const response = await fetch("/api/application-materials", {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${session.access_token}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ job_id: jobId, consent: consent.checked })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Could not generate application materials.");
+        renderApplicationMaterials(payload);
+        setMessage(message, "Tailored draft generated and saved.", "success");
+    } catch (error) {
+        setMessage(message, error.message || "Could not generate application materials.", "error");
+    } finally {
+        consent.checked = false;
+        button.disabled = false;
+    }
+}
+
+async function copyApplicationMaterials() {
+    const bullets = [...document.querySelectorAll("#application-material-bullets li")]
+        .map((item) => `• ${item.textContent}`)
+        .join("\n");
+    const coverLetter = document.getElementById("application-material-cover-letter").textContent;
+    try {
+        await navigator.clipboard.writeText(`${bullets}\n\nCover Letter\n\n${coverLetter}`);
+        setMessage(document.getElementById("application-material-message"), "Résumé bullets and cover letter copied.", "success");
+    } catch (error) {
+        setMessage(document.getElementById("application-material-message"), "Could not access the clipboard.", "error");
     }
 }
 
@@ -1049,6 +1164,16 @@ function createJobCard(job, { provider = false, application = null, match = null
     if (matchDetails) {
         card.appendChild(createJobMatchDetails(job, matchDetails));
     }
+    const tailorButton = document.createElement("button");
+    tailorButton.type = "button";
+    tailorButton.className = "secondary-button";
+    tailorButton.textContent = "Tailor resume & cover letter";
+    tailorButton.addEventListener("click", () => {
+        window.location.hash = "application-materials";
+        document.getElementById("application-material-job").value = job.id;
+        loadApplicationMaterials(job.id);
+    });
+    card.appendChild(tailorButton);
 
     if (application) {
         const applicationDate = document.createElement("p");
@@ -1118,6 +1243,11 @@ function renderProviderApplicants() {
         (jobId === "all" || application.job_id === jobId)
         && (statusFilter === "all" || application.status === statusFilter)
     );
+    filtered.sort((first, second) => {
+        const firstScore = currentApplicantMatches.get(first.id)?.score;
+        const secondScore = currentApplicantMatches.get(second.id)?.score;
+        return (secondScore ?? -1) - (firstScore ?? -1);
+    });
     list.replaceChildren();
     if (!filtered.length) {
         list.appendChild(createEmptyState("No applicants to show", "Applications appear here when someone applies to one of your published jobs."));
@@ -1139,6 +1269,16 @@ function renderProviderApplicants() {
         note.className = "provider-cover-note";
         note.textContent = application.cover_note || "No message included.";
         details.append(name, email, role, note);
+        const match = currentApplicantMatches.get(application.id);
+        if (match) {
+            const matchScore = document.createElement("span");
+            matchScore.className = "job-match-score";
+            matchScore.textContent = match.score === null
+                ? "Alignment unavailable"
+                : `${match.score}/100 evidence alignment`;
+            details.appendChild(matchScore);
+            details.appendChild(createApplicantMatchDetails(match));
+        }
         const resume = document.createElement("button");
         resume.type = "button";
         resume.className = "secondary-button applicant-resume-button";
@@ -1188,6 +1328,36 @@ function renderProviderApplicants() {
     });
 }
 
+function createApplicantMatchDetails(match) {
+    const details = document.createElement("details");
+    details.className = "job-match-details applicant-match-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "View evidence breakdown";
+    details.appendChild(summary);
+    const explanation = document.createElement("div");
+    explanation.className = "job-match-explanation";
+    const score = document.createElement("p");
+    score.className = "job-match-score-explanation";
+    score.textContent = match.score === null
+        ? "No alignment score is shown because the applicant has no saved profile evidence for recognized requirements."
+        : `Evidence alignment: ${match.score}/100. Required skills carry 80% and preferred skills 20% when both groups are present.`;
+    explanation.append(
+        score,
+        createMatchSkillList("Required skills", match.required_skills || []),
+        createMatchSkillList("Preferred skills", match.preferred_skills || [])
+    );
+    const limitations = document.createElement("ul");
+    limitations.className = "job-match-limitations";
+    (match.limitations || []).forEach((limitation) => {
+        const item = document.createElement("li");
+        item.textContent = limitation;
+        limitations.appendChild(item);
+    });
+    explanation.appendChild(limitations);
+    details.appendChild(explanation);
+    return details;
+}
+
 async function openApplicantResume(application, button) {
     const preview = window.open("about:blank", "_blank");
     if (!preview) {
@@ -1221,19 +1391,20 @@ async function saveApplicationReview(applicationId, notesInput, interviewInput, 
     button.disabled = true;
     button.textContent = "Saving...";
     try {
-        const { error } = await supabaseClient.from("application_reviews").upsert({
-            application_id: applicationId,
-            provider_id: currentUser.id,
-            reviewer_notes: notesInput.value.trim(),
-            interview_at: interviewInput.value ? new Date(interviewInput.value).toISOString() : null
-        }, { onConflict: "application_id" });
-        if (error) throw error;
+        await careerApi(`/api/provider/application-reviews/${applicationId}`, {
+            method: "POST",
+            body: JSON.stringify({
+                reviewer_notes: notesInput.value.trim(),
+                interview_at: interviewInput.value ? new Date(interviewInput.value).toISOString() : null
+            })
+        });
         currentApplicationReviews.set(applicationId, {
             application_id: applicationId,
             reviewer_notes: notesInput.value.trim(),
             interview_at: interviewInput.value ? new Date(interviewInput.value).toISOString() : null
         });
         setMessage(document.getElementById("provider-applicants-message"), "Private review notes saved.", "success");
+        await loadNotifications();
     } catch (error) {
         setMessage(document.getElementById("provider-applicants-message"), supabaseErrorMessage(error), "error");
     } finally {
@@ -1469,15 +1640,15 @@ async function submitJobApplication(event) {
 async function updateJobApplicationStatus(id, status, control) {
     control.disabled = true;
     try {
-        const { error } = await supabaseClient
-            .from("job_applications")
-            .update({ status })
-            .eq("id", id);
-        if (error) throw error;
+        await careerApi(`/api/provider/job-applications/${id}/status`, {
+            method: "PATCH",
+            body: JSON.stringify({ status })
+        });
         const application = currentJobApplications.find((item) => item.id === id);
         if (application) application.status = status;
         renderProviderWorkspace();
         setMessage(document.getElementById("provider-applicants-message"), `Applicant moved to ${status}.`, "success");
+        await loadNotifications();
     } catch (error) {
         setMessage(document.getElementById("provider-applicants-message"), supabaseErrorMessage(error), "error");
         const application = currentJobApplications.find((item) => item.id === id);
@@ -1803,7 +1974,7 @@ async function loadProfile() {
     if (!userId) return;
     const { data, error } = await supabaseClient
         .from("career_profiles")
-        .select("current_position,headline,about,target_role,skills,location,phone,education,linkedin_target_role_draft,linkedin_headline_draft,linkedin_about_draft")
+        .select("current_position,headline,about,target_role,skills,location,phone,education")
         .maybeSingle();
     if (currentUser?.id !== userId) return;
     if (error) {
@@ -1822,12 +1993,6 @@ async function loadProfile() {
     document.getElementById("my-profile-location").value = currentCareerProfile.location || "";
     document.getElementById("my-profile-phone").value = currentCareerProfile.phone || "";
     document.getElementById("my-profile-education").value = currentCareerProfile.education || "";
-    document.getElementById("linkedin-target-role").value =
-        currentCareerProfile.linkedin_target_role_draft ?? currentCareerProfile.target_role ?? "";
-    document.getElementById("linkedin-headline-draft").value =
-        currentCareerProfile.linkedin_headline_draft ?? currentCareerProfile.headline ?? "";
-    document.getElementById("linkedin-about-draft").value =
-        currentCareerProfile.linkedin_about_draft ?? currentCareerProfile.about ?? "";
     document.getElementById("skill-target-role").value = currentCareerProfile.target_role || "";
     document.getElementById("current-skills").value = (currentCareerProfile.skills || []).join(", ");
     if (
@@ -1921,26 +2086,6 @@ async function saveEmployerProfile(event) {
     }
     setMessage(message, "Your employer profile has been saved.", "success");
     button.disabled = false;
-}
-
-async function saveLinkedInDraft(event) {
-    event.preventDefault();
-    const button = event.currentTarget.querySelector("button[type='submit']");
-    button.disabled = true;
-    const payload = {
-        user_id: currentUser.id,
-        linkedin_target_role_draft: document.getElementById("linkedin-target-role").value.trim(),
-        linkedin_headline_draft: document.getElementById("linkedin-headline-draft").value.trim(),
-        linkedin_about_draft: document.getElementById("linkedin-about-draft").value.trim()
-    };
-    const { error } = await supabaseClient.from("career_profiles").upsert(payload, { onConflict: "user_id" });
-    button.disabled = false;
-    if (error) {
-        setMessage(document.getElementById("profile-message"), supabaseErrorMessage(error), "error");
-        return;
-    }
-    currentCareerProfile = { ...currentCareerProfile, ...payload };
-    setMessage(document.getElementById("profile-message"), "Your LinkedIn draft has been saved separately.", "success");
 }
 
 async function saveMyProfile(event) {
@@ -2386,326 +2531,93 @@ async function careerApi(path, options = {}) {
     return payload;
 }
 
-async function loadCommunityFeed() {
-    const message = document.getElementById("community-message");
-    setMessage(message, "Loading Community conversations...");
+async function loadNotifications() {
     try {
-        communityPosts = await careerApi("/api/community/posts");
-        if (!Array.isArray(communityPosts)) throw new Error("Community returned an unexpected response.");
-        setMessage(message, "");
-        renderCommunityFeed();
+        const result = await careerApi("/api/notifications");
+        currentNotifications = Array.isArray(result.notifications) ? result.notifications : [];
+        renderNotifications();
     } catch (error) {
-        communityPosts = [];
-        setMessage(message, error.message || "Could not load Community.", "error");
-        renderCommunityFeed();
+        setMessage(document.getElementById("notifications-message"), error.message || "Could not load notifications.", "error");
     }
 }
 
-function formatCommunityDate(value) {
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "Recently";
-    return new Intl.DateTimeFormat(undefined, {
-        month: "short",
-        day: "numeric",
-        year: date.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined
-    }).format(date);
-}
-
-function communityReactionCount(post, reaction) {
-    return post.reactions.filter((item) => item.reaction === reaction).length;
-}
-
-function communityUserReacted(post, reaction) {
-    return post.reactions.some((item) =>
-        item.reaction === reaction && item.user_id === currentUser?.id
-    );
-}
-
-function renderCommunityFeed() {
-    const feed = document.getElementById("community-feed");
-    const empty = document.getElementById("community-empty");
-    const search = document.getElementById("community-search").value.trim().toLowerCase();
-    const category = document.getElementById("community-category-filter").value;
-    const feedFilter = document.getElementById("community-feed-filter").value;
-
-    let filtered = communityPosts.filter((post) => {
-        const matchesCategory = category === "all" || post.category === category;
-        const haystack = `${post.title} ${post.body} ${post.category} ${post.author_name}`.toLowerCase();
-        const matchesSearch = !search || haystack.includes(search);
-        const matchesSaved = feedFilter !== "saved" || post.is_saved;
-        const matchesMine = feedFilter !== "mine" || post.author_id === currentUser?.id;
-        return matchesCategory && matchesSearch && matchesSaved && matchesMine;
-    });
-
-    if (feedFilter === "discussed") {
-        filtered = [...filtered].sort((a, b) => b.comments.length - a.comments.length);
+function renderNotifications() {
+    const list = document.getElementById("notification-list");
+    if (!list) return;
+    const unread = currentNotifications.filter((item) => !item.read_at).length;
+    const count = document.getElementById("notification-count");
+    if (count) {
+        count.textContent = String(unread);
+        count.hidden = unread === 0;
     }
-
-    feed.replaceChildren();
-    empty.hidden = filtered.length > 0;
-    filtered.forEach((post) => feed.appendChild(createCommunityPostCard(post)));
-}
-
-function createCommunityPostCard(post) {
-    const card = document.createElement("article");
-    card.className = "community-post";
-    card.dataset.postId = post.id;
-
-    const header = document.createElement("div");
-    header.className = "community-post-header";
-    const badges = document.createElement("div");
-    badges.className = "community-post-badges";
-    const category = document.createElement("span");
-    category.className = "community-category";
-    category.textContent = post.category;
-    badges.appendChild(category);
-    if (post.is_pinned) {
-        const pinned = document.createElement("span");
-        pinned.className = "community-pinned";
-        pinned.textContent = "Pinned";
-        badges.appendChild(pinned);
+    list.replaceChildren();
+    if (!currentNotifications.length) {
+        list.appendChild(createEmptyState("You’re all caught up", "New application updates and reminders will appear here."));
+        return;
     }
-    if (post.status === "closed") {
-        const closed = document.createElement("span");
-        closed.className = "community-closed";
-        closed.textContent = "Closed";
-        badges.appendChild(closed);
-    }
-    header.appendChild(badges);
-
-    if (post.author_id === currentUser?.id) {
-        const ownerActions = document.createElement("div");
-        ownerActions.className = "community-owner-actions";
-        const edit = document.createElement("button");
-        edit.type = "button";
-        edit.className = "community-text-button";
-        edit.textContent = "Edit";
-        edit.addEventListener("click", () => openCommunityEditor(post));
-        const remove = document.createElement("button");
-        remove.type = "button";
-        remove.className = "community-text-button danger";
-        remove.textContent = "Delete";
-        remove.addEventListener("click", () => deleteCommunityPost(post.id));
-        ownerActions.append(edit, remove);
-        header.appendChild(ownerActions);
-    }
-
-    const title = document.createElement("h2");
-    title.textContent = post.title;
-    const body = document.createElement("p");
-    body.className = "community-post-body";
-    body.textContent = post.body;
-
-    const author = document.createElement("div");
-    author.className = "community-author";
-    const avatar = document.createElement("span");
-    avatar.className = "community-avatar";
-    avatar.textContent = (post.author_name || "CM").trim().slice(0, 2).toUpperCase();
-    const authorText = document.createElement("span");
-    const authorName = document.createElement("strong");
-    authorName.textContent = post.author_name || "CareerLens member";
-    const authorMeta = document.createElement("small");
-    authorMeta.textContent = `${post.author_type === "job_provider" ? "Employer" : "Job seeker"} · ${formatCommunityDate(post.created_at)}`;
-    authorText.append(authorName, authorMeta);
-    author.append(avatar, authorText);
-
-    const actions = document.createElement("div");
-    actions.className = "community-actions";
-    ["helpful", "insightful", "congrats"].forEach((reaction) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "community-reaction";
-        button.classList.toggle("active", communityUserReacted(post, reaction));
-        const label = reaction === "congrats" ? "Celebrate" : reaction[0].toUpperCase() + reaction.slice(1);
-        button.textContent = `${label} ${communityReactionCount(post, reaction)}`;
-        button.disabled = post.status === "closed";
-        button.addEventListener("click", () => toggleCommunityReaction(post, reaction));
-        actions.appendChild(button);
-    });
-    const save = document.createElement("button");
-    save.type = "button";
-    save.className = "community-save";
-    save.textContent = post.is_saved ? "Saved" : "Save";
-    save.classList.toggle("active", post.is_saved);
-    save.addEventListener("click", () => toggleCommunitySavedPost(post));
-    actions.appendChild(save);
-
-    const comments = document.createElement("section");
-    comments.className = "community-comments";
-    const commentsHeading = document.createElement("h3");
-    commentsHeading.textContent = `${post.comments.length} ${post.comments.length === 1 ? "reply" : "replies"}`;
-    comments.appendChild(commentsHeading);
-    post.comments.forEach((comment) => {
-        const item = document.createElement("div");
-        item.className = "community-comment";
-        const commentAvatar = document.createElement("span");
-        commentAvatar.className = "community-comment-avatar";
-        commentAvatar.textContent = (comment.author_name || "CM").trim().slice(0, 2).toUpperCase();
-        const commentBody = document.createElement("div");
-        const commentMeta = document.createElement("div");
-        commentMeta.className = "community-comment-meta";
-        const commentName = document.createElement("strong");
-        commentName.textContent = comment.author_name || "CareerLens member";
-        const commentDate = document.createElement("span");
-        commentDate.textContent = formatCommunityDate(comment.created_at);
-        commentMeta.append(commentName, commentDate);
-        const commentText = document.createElement("p");
-        commentText.textContent = comment.body;
-        commentBody.append(commentMeta, commentText);
-        if (comment.author_id === currentUser?.id) {
-            const remove = document.createElement("button");
-            remove.type = "button";
-            remove.className = "community-text-button danger";
-            remove.textContent = "Delete";
-            remove.addEventListener("click", () => deleteCommunityComment(comment.id));
-            commentBody.appendChild(remove);
+    currentNotifications.forEach((notification) => {
+        const card = document.createElement("article");
+        card.className = `notification-card${notification.read_at ? " is-read" : ""}`;
+        const heading = document.createElement("strong");
+        heading.textContent = notification.title;
+        const body = document.createElement("p");
+        body.textContent = notification.body;
+        const actions = document.createElement("div");
+        actions.className = "notification-actions";
+        if (notification.data?.application_id && notification.notification_type === "interview_scheduled") {
+            const calendar = document.createElement("button");
+            calendar.type = "button";
+            calendar.className = "secondary-button";
+            calendar.textContent = "Add to calendar (.ics)";
+            calendar.addEventListener("click", () => downloadInterviewCalendar(notification.data.application_id, calendar));
+            actions.appendChild(calendar);
         }
-        item.append(commentAvatar, commentBody);
-        comments.appendChild(item);
-    });
-
-    if (post.status === "open") {
-        const form = document.createElement("form");
-        form.className = "community-comment-form";
-        const input = document.createElement("textarea");
-        input.rows = 2;
-        input.maxLength = 2000;
-        input.required = true;
-        input.placeholder = "Add a constructive reply...";
-        const button = document.createElement("button");
-        button.type = "submit";
-        button.className = "secondary-button";
-        button.textContent = "Reply";
-        form.append(input, button);
-        form.addEventListener("submit", (event) => {
-            event.preventDefault();
-            submitCommunityComment(post.id, input.value, button);
-        });
-        comments.appendChild(form);
-    } else {
-        const closed = document.createElement("p");
-        closed.className = "community-comment-closed";
-        closed.textContent = "This post is closed to new replies.";
-        comments.appendChild(closed);
-    }
-
-    card.append(header, title, body, author, actions, comments);
-    return card;
-}
-
-function openCommunityEditor(post) {
-    editingCommunityPostId = post.id;
-    document.getElementById("community-composer").hidden = false;
-    document.getElementById("community-post-title").value = post.title;
-    document.getElementById("community-post-category").value = post.category;
-    document.getElementById("community-post-body").value = post.body;
-    document.getElementById("community-post-submit").textContent = "Save changes";
-    document.getElementById("community-composer").scrollIntoView({ block: "center" });
-}
-
-function closeCommunityEditor() {
-    editingCommunityPostId = null;
-    document.getElementById("community-composer").reset();
-    document.getElementById("community-composer").hidden = true;
-    document.getElementById("community-post-submit").textContent = "Publish post";
-}
-
-async function submitCommunityPost(event) {
-    event.preventDefault();
-    const submit = document.getElementById("community-post-submit");
-    const wasEditing = Boolean(editingCommunityPostId);
-    const payload = {
-        title: document.getElementById("community-post-title").value,
-        category: document.getElementById("community-post-category").value,
-        body: document.getElementById("community-post-body").value
-    };
-    submit.disabled = true;
-    try {
-        if (editingCommunityPostId) {
-            await careerApi(`/api/community/posts/${encodeURIComponent(editingCommunityPostId)}`, {
-                method: "PATCH",
-                body: JSON.stringify(payload)
-            });
-        } else {
-            await careerApi("/api/community/posts", {
-                method: "POST",
-                body: JSON.stringify(payload)
-            });
+        if (!notification.read_at && !String(notification.id).startsWith("follow-up:")) {
+            const read = document.createElement("button");
+            read.type = "button";
+            read.className = "text-button";
+            read.textContent = "Mark read";
+            read.addEventListener("click", () => markNotificationRead(notification.id));
+            actions.appendChild(read);
         }
-        closeCommunityEditor();
-        setMessage(document.getElementById("community-message"), wasEditing ? "Post updated." : "Your post has been published.", "success");
-        await loadCommunityFeed();
-    } catch (error) {
-        setMessage(document.getElementById("community-message"), error.message || "Could not publish the post.", "error");
-    } finally {
-        submit.disabled = false;
-    }
+        card.append(heading, body, actions);
+        list.appendChild(card);
+    });
 }
 
-async function deleteCommunityPost(postId) {
-    if (!window.confirm("Delete this Community post? This will also remove its replies and reactions.")) return;
+async function markNotificationRead(id) {
     try {
-        await careerApi(`/api/community/posts/${encodeURIComponent(postId)}`, { method: "DELETE" });
-        setMessage(document.getElementById("community-message"), "Post deleted.", "success");
-        await loadCommunityFeed();
+        await careerApi(`/api/notifications/${id}/read`, { method: "PATCH" });
+        currentNotifications = currentNotifications.map((item) => item.id === id ? { ...item, read_at: new Date().toISOString() } : item);
+        renderNotifications();
     } catch (error) {
-        setMessage(document.getElementById("community-message"), error.message || "Could not delete the post.", "error");
+        setMessage(document.getElementById("notifications-message"), error.message, "error");
     }
 }
 
-async function submitCommunityComment(postId, body, button) {
-    if (!body.trim()) return;
+async function downloadInterviewCalendar(applicationId, button) {
+    const previous = button.textContent;
     button.disabled = true;
+    button.textContent = "Preparing...";
     try {
-        await careerApi(`/api/community/posts/${encodeURIComponent(postId)}/comments`, {
-            method: "POST",
-            body: JSON.stringify({ body })
-        });
-        await loadCommunityFeed();
+        const { data: { session }, error } = await supabaseClient.auth.getSession();
+        if (error || !session) throw error || new Error("Your session has expired. Please sign in again.");
+        const response = await fetch(`/api/job-applications/${applicationId}/interview.ics`, { headers: { Authorization: `Bearer ${session.access_token}` } });
+        if (!response.ok) {
+            const payload = await response.json();
+            throw new Error(payload.error || "Could not create the calendar file.");
+        }
+        const blob = await response.blob();
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "careerlens-interview.ics";
+        link.click();
+        URL.revokeObjectURL(link.href);
     } catch (error) {
-        setMessage(document.getElementById("community-message"), error.message || "Could not add the reply.", "error");
+        setMessage(document.getElementById("notifications-message"), error.message, "error");
     } finally {
         button.disabled = false;
-    }
-}
-
-async function deleteCommunityComment(commentId) {
-    if (!window.confirm("Delete this reply?")) return;
-    try {
-        await careerApi(`/api/community/comments/${encodeURIComponent(commentId)}`, { method: "DELETE" });
-        await loadCommunityFeed();
-    } catch (error) {
-        setMessage(document.getElementById("community-message"), error.message || "Could not delete the reply.", "error");
-    }
-}
-
-async function toggleCommunityReaction(post, reaction) {
-    const reacted = communityUserReacted(post, reaction);
-    try {
-        await careerApi(
-            reacted
-                ? `/api/community/posts/${encodeURIComponent(post.id)}/reactions/${encodeURIComponent(reaction)}`
-                : `/api/community/posts/${encodeURIComponent(post.id)}/reactions`,
-            {
-                method: reacted ? "DELETE" : "POST",
-                body: reacted ? undefined : JSON.stringify({ reaction })
-            }
-        );
-        await loadCommunityFeed();
-    } catch (error) {
-        setMessage(document.getElementById("community-message"), error.message || "Could not update the reaction.", "error");
-    }
-}
-
-async function toggleCommunitySavedPost(post) {
-    try {
-        await careerApi(
-            `/api/community/posts/${encodeURIComponent(post.id)}/saved`,
-            { method: post.is_saved ? "DELETE" : "POST" }
-        );
-        await loadCommunityFeed();
-    } catch (error) {
-        setMessage(document.getElementById("community-message"), error.message || "Could not update the saved post.", "error");
+        button.textContent = previous;
     }
 }
 
@@ -3229,126 +3141,6 @@ async function renderSkillAnalysis(event) {
     }
 }
 
-function appendCoachFormattedText(element, text) {
-    const parts = text.split(/(\*\*[^*]+\*\*)/g);
-    parts.forEach((part) => {
-        if (part.startsWith("**") && part.endsWith("**")) {
-            const strong = document.createElement("strong");
-            strong.textContent = part.slice(2, -2);
-            element.appendChild(strong);
-        } else if (part) {
-            element.appendChild(document.createTextNode(part));
-        }
-    });
-}
-
-function renderCoachAnswer(answerText) {
-    const content = document.getElementById("coach-answer-content");
-    content.replaceChildren();
-    let paragraphLines = [];
-    let list = null;
-
-    const flushParagraph = () => {
-        if (!paragraphLines.length) return;
-        const paragraph = document.createElement("p");
-        appendCoachFormattedText(paragraph, paragraphLines.join(" "));
-        content.appendChild(paragraph);
-        paragraphLines = [];
-    };
-    const flushList = () => {
-        if (list) content.appendChild(list);
-        list = null;
-    };
-
-    answerText.split(/\r?\n/).forEach((rawLine) => {
-        const line = rawLine.trim();
-        if (!line) {
-            flushParagraph();
-            flushList();
-            return;
-        }
-        const headingMatch = line.match(/^#{1,3}\s+(.+)/);
-        if (headingMatch) {
-            flushParagraph();
-            flushList();
-            const heading = document.createElement("h4");
-            appendCoachFormattedText(heading, headingMatch[1].replace(/\*\*/g, ""));
-            content.appendChild(heading);
-            return;
-        }
-        const listMatch = line.match(/^(?:[-*]\s+|\d+[.)]\s+)(.+)/);
-        if (listMatch) {
-            flushParagraph();
-            const ordered = /^\d+[.)]\s+/.test(line);
-            const listType = ordered ? "ol" : "ul";
-            if (list?.tagName.toLowerCase() !== listType) {
-                flushList();
-                list = document.createElement(listType);
-            }
-            const item = document.createElement("li");
-            appendCoachFormattedText(item, listMatch[1]);
-            list.appendChild(item);
-            return;
-        }
-        flushList();
-        paragraphLines.push(line);
-    });
-    flushParagraph();
-    flushList();
-}
-
-async function submitCareerCoach(event) {
-    event.preventDefault();
-    const question = document.getElementById("coach-question").value.trim();
-    const consent = document.getElementById("coach-consent");
-    const button = document.getElementById("coach-submit");
-    const message = document.getElementById("coach-message");
-    if (!consent.checked) {
-        setMessage(message, "Please confirm before sending your question to Google Gemini.", "error");
-        return;
-    }
-
-    button.disabled = true;
-    document.getElementById("coach-answer").hidden = true;
-    setMessage(message, "Taking a moment to think through your question...");
-    try {
-        const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
-        if (sessionError) throw sessionError;
-        if (!session) throw new Error("Your session has expired. Please sign in again.");
-        const response = await fetch("/api/ai-assist", {
-            method: "POST",
-            headers: {
-                Authorization: ["Bearer", session.access_token].join(" "),
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                task: "career_coach",
-                role: "Career guidance",
-                text: question,
-                consent: true
-            })
-        });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || "Could not get career guidance.");
-        if (typeof payload.answer !== "string" || !payload.answer.trim()) {
-            throw new Error("The career coach returned an empty response. Please try again.");
-        }
-        latestCoachAnswer = payload.answer.trim();
-        renderCoachAnswer(latestCoachAnswer);
-        document.getElementById("coach-answer").hidden = false;
-        setMessage(message, "Your guidance is ready.", "success");
-        document.getElementById("coach-answer").scrollIntoView({
-            behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-            block: "nearest"
-        });
-    } catch (error) {
-        setMessage(message, error.message || "Could not get career guidance. Please try again.", "error");
-    } finally {
-        consent.checked = false;
-        button.disabled = false;
-    }
-}
-
 function updatePracticeProgress() {
     const questions = [...document.querySelectorAll(".practice-question-check")];
     const practiced = questions.filter((checkbox) => checkbox.checked).length;
@@ -3526,77 +3318,6 @@ async function submitAIAssist(event) {
     }
 }
 
-async function submitLinkedInSuggestions(event) {
-    event.preventDefault();
-    const button = document.getElementById("linkedin-ai-submit");
-    const consent = document.getElementById("linkedin-ai-consent");
-    const message = document.getElementById("linkedin-ai-message");
-    if (!consent.checked) {
-        setMessage(message, "Confirm consent before sending your profile details to Gemini.", "error");
-        return;
-    }
-
-    button.disabled = true;
-    document.getElementById("linkedin-ai-result").hidden = true;
-    setMessage(message, "Sending the selected professional details to Gemini...");
-    try {
-        const role = [
-            document.getElementById("linkedin-target-role").value,
-            document.getElementById("my-profile-target-role").value,
-            document.getElementById("my-profile-current-role").value
-        ].map((value) => value.trim()).find((value) => value.length >= 2) || "";
-        if (role.length < 2) {
-            throw new Error("Add a current or target role in My Profile or LinkedIn Optimizer first.");
-        }
-
-        const details = [
-            ["Current role", document.getElementById("my-profile-current-role").value],
-            ["Career target role", document.getElementById("my-profile-target-role").value],
-            ["Professional headline", document.getElementById("my-profile-headline").value],
-            ["About summary", document.getElementById("my-profile-about").value],
-            ["Skills", document.getElementById("my-profile-skills").value],
-            ["Education", document.getElementById("my-profile-education").value],
-            ["LinkedIn target role", document.getElementById("linkedin-target-role").value],
-            ["LinkedIn headline draft", document.getElementById("linkedin-headline-draft").value],
-            ["LinkedIn About draft", document.getElementById("linkedin-about-draft").value]
-        ].filter(([, value]) => value.trim());
-        const text = details.map(([label, value]) => `${label}: ${value.trim()}`).join("\n\n");
-        if (text.length < 40) {
-            throw new Error("Add more profile details or LinkedIn draft text before requesting suggestions.");
-        }
-        if (text.length > 8000) {
-            throw new Error("Shorten the selected profile and draft text to 8,000 characters or fewer.");
-        }
-
-        const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
-        if (sessionError) throw sessionError;
-        if (!session) throw new Error("Your session has expired. Please sign in again.");
-        const response = await fetch("/api/ai-assist", {
-            method: "POST",
-            headers: {
-                Authorization: ["Bearer", session.access_token].join(" "),
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                task: "linkedin_profile",
-                role,
-                text,
-                consent: consent.checked
-            })
-        });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || "Gemini could not process this request.");
-        document.getElementById("linkedin-ai-answer").textContent = payload.answer;
-        document.getElementById("linkedin-ai-result").hidden = false;
-        setMessage(message, "Suggestions are ready. Review and copy any changes you want to keep.", "success");
-    } catch (error) {
-        setMessage(message, error.message || "Could not get LinkedIn suggestions.", "error");
-    } finally {
-        consent.checked = false;
-        button.disabled = false;
-    }
-}
-
 function downloadInterviewPack() {
     if (!currentInterviewPack) return;
     const lines = [
@@ -3638,49 +3359,6 @@ function downloadInterviewPack() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function analyzeResume(event) {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const formData = new FormData(form);
-    const file = formData.get("resume");
-    const message = document.getElementById("ats-message");
-    const button = document.getElementById("analyze-button");
-    if (!(file instanceof File) || !file.name) {
-        setMessage(message, "Choose a PDF resume before analyzing.", "error");
-        return;
-    }
-    if (file.size > maxResumeBytes) {
-        setMessage(message, `The PDF must be ${Math.floor(maxResumeBytes / 1024 / 1024)} MB or smaller.`, "error");
-        return;
-    }
-    button.disabled = true;
-    setMessage(message, "Analyzing your resume...");
-    try {
-        const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
-        if (sessionError) throw sessionError;
-        if (!session) throw new Error("Your session has expired. Please sign in again.");
-        const response = await fetch("/api/analyze-resume", {
-            method: "POST",
-            headers: { Authorization: `Bearer ${session.access_token}` },
-            body: formData
-        });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || "Resume analysis failed.");
-        document.getElementById("ats-score").textContent = String(payload.score);
-        document.getElementById("ats-stat").innerHTML = `${payload.score}<small> / 100</small>`;
-        renderList(document.getElementById("matched-keywords"), payload.matched_keywords || [], "No matched keywords found.");
-        renderList(document.getElementById("missing-keywords"), payload.missing_keywords || [], "No missing keywords found.");
-        renderList(document.getElementById("ats-suggestions"), payload.suggestions || [], "No suggestions available.");
-        document.getElementById("ats-note").textContent = payload.note || "";
-        document.getElementById("ats-results").hidden = false;
-        setMessage(message, "Resume analysis complete.", "success");
-    } catch (error) {
-        setMessage(message, error.message || "Could not analyze your resume.", "error");
-    } finally {
-        button.disabled = false;
-    }
-}
-
 document.querySelectorAll("[data-auth-mode]").forEach((tab) => {
     tab.addEventListener("click", () => setAuthMode(tab.dataset.authMode));
 });
@@ -3689,16 +3367,6 @@ document.getElementById("password-update-form").addEventListener("submit", updat
 document.getElementById("forgot-password").addEventListener("click", sendPasswordReset);
 document.getElementById("resend-confirmation").addEventListener("click", resendSignupConfirmation);
 document.getElementById("sign-out").addEventListener("click", signOut);
-document.getElementById("community-composer").addEventListener("submit", submitCommunityPost);
-document.getElementById("community-composer-toggle").addEventListener("click", () => {
-    closeCommunityEditor();
-    document.getElementById("community-composer").hidden = false;
-    document.getElementById("community-post-title").focus();
-});
-document.getElementById("community-composer-close").addEventListener("click", closeCommunityEditor);
-document.getElementById("community-search").addEventListener("input", renderCommunityFeed);
-document.getElementById("community-category-filter").addEventListener("change", renderCommunityFeed);
-document.getElementById("community-feed-filter").addEventListener("change", renderCommunityFeed);
 document.getElementById("learning-search").addEventListener("input", renderLearningWorkspace);
 document.getElementById("learning-category-filter").addEventListener("change", renderLearningWorkspace);
 document.getElementById("learning-difficulty-filter").addEventListener("change", renderLearningWorkspace);
@@ -3736,42 +3404,34 @@ applicationSearch.addEventListener("input", renderApplications);
 applicationFilter.addEventListener("change", renderApplications);
 document.getElementById("export-applications").addEventListener("click", exportApplications);
 applicationForm.addEventListener("submit", saveApplication);
-document.getElementById("profile-form").addEventListener("submit", saveLinkedInDraft);
 document.getElementById("my-profile-form").addEventListener("submit", saveMyProfile);
 document.getElementById("employer-profile-form").addEventListener("submit", saveEmployerProfile);
-document.getElementById("linkedin-ai-form").addEventListener("submit", submitLinkedInSuggestions);
 document.getElementById("portfolio-form").addEventListener("submit", savePortfolioProject);
 document.getElementById("project-cancel-edit").addEventListener("click", resetPortfolioEditor);
 document.getElementById("skill-form").addEventListener("submit", renderSkillAnalysis);
 document.getElementById("skill-job-listing")?.addEventListener("change", fillSkillAnalysisFromJob);
-document.getElementById("ats-form").addEventListener("submit", analyzeResume);
+document.getElementById("application-material-job")?.addEventListener("change", (event) => loadApplicationMaterials(event.target.value));
+document.getElementById("application-materials-form")?.addEventListener("submit", generateApplicationMaterials);
+document.getElementById("application-material-copy")?.addEventListener("click", copyApplicationMaterials);
 interviewPrepForm.addEventListener("submit", generateInterviewPack);
 aiAssistForm.addEventListener("submit", submitAIAssist);
 document.getElementById("download-interview-pack").addEventListener("click", downloadInterviewPack);
-document.getElementById("coach-form").addEventListener("submit", submitCareerCoach);
-document.querySelectorAll(".coach-prompt").forEach((button) => {
+document.querySelectorAll(".ai-assistant-tab").forEach((button) => {
     button.addEventListener("click", () => {
-        const input = document.getElementById("coach-question");
-        input.value = button.dataset.prompt;
-        document.getElementById("coach-consent").checked = false;
-        document.getElementById("coach-message").textContent = "";
-        document.getElementById("coach-answer").hidden = true;
-        input.focus();
+        document.querySelectorAll(".ai-assistant-tab").forEach((tab) => {
+            const active = tab === button;
+            tab.classList.toggle("is-active", active);
+            tab.setAttribute("aria-selected", String(active));
+        });
+        const task = button.dataset.aiTask;
+        const text = document.getElementById("ai-text");
+        document.getElementById("ai-task").value = task;
+        text.minLength = task === "ask_question" ? 2 : 40;
+        text.placeholder = task === "ask_question"
+            ? "Ask a career question and include any context that would help."
+            : "Paste the résumé excerpt or interview answer you want help with.";
+        document.getElementById("ai-role").value = task === "ask_question" ? "Career guidance" : "";
     });
-});
-document.getElementById("coach-copy").addEventListener("click", async () => {
-    if (!latestCoachAnswer) return;
-    const button = document.getElementById("coach-copy");
-    try {
-        await navigator.clipboard.writeText(latestCoachAnswer);
-        setMessage(document.getElementById("coach-message"), "Guidance copied to your clipboard.", "success");
-        button.lastChild.textContent = "Copied";
-        window.setTimeout(() => {
-            button.lastChild.textContent = "Copy";
-        }, 1600);
-    } catch (error) {
-        setMessage(document.getElementById("coach-message"), "Could not copy the guidance. You can select and copy it manually.", "error");
-    }
 });
 document.querySelectorAll(".nav-link").forEach((link) => {
     link.addEventListener("click", (event) => {

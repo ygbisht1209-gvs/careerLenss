@@ -4,7 +4,7 @@ import os
 import re
 import time
 import uuid
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -30,21 +30,16 @@ MAX_AI_TEXT_LENGTH = 8000
 MAX_SKILL_INPUT_LENGTH = 12000
 LEARNING_STATUSES = {"not_started", "in_progress", "completed"}
 EMPLOYER_AI_TASKS = {"improve_job_description", "interview_kit"}
-COMMUNITY_CATEGORIES = {
-    "Career advice",
-    "Interview tips",
-    "Job search",
-    "Skill building",
-    "Hiring",
-    "Success stories",
-}
-COMMUNITY_REACTIONS = {"helpful", "insightful", "congrats"}
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE + 128 * 1024
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 GEMINI_RETRY_DELAYS = (1, 2)
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+NOTIFICATION_EMAIL_FROM = os.environ.get(
+    "NOTIFICATION_EMAIL_FROM", "CareerLens <notifications@example.com>"
+)
 
 AI_TASKS = {
     "resume_feedback": (
@@ -57,8 +52,8 @@ AI_TASKS = {
         "what is clear, what evidence is missing, and how to organize it using "
         "Situation, Task, Action, and Result. Do not fabricate personal details."
     ),
-    "career_coach": (
-        "Act as a thoughtful, practical career coach. Answer the user's actual "
+    "ask_question": (
+        "Act as a thoughtful, practical career assistant. Answer the user's actual "
         "question directly, using the context they provide instead of generic "
         "career advice. Be warm, clear, and specific. Offer a small number of "
         "realistic next steps and, only when useful, one focused follow-up "
@@ -69,13 +64,6 @@ AI_TASKS = {
         "bullets only when they make the answer easier to follow. Avoid canned "
         "checklists unless the user asks for one, and end with one concrete first "
         "step when appropriate."
-    ),
-    "linkedin_profile": (
-        "Help a job seeker improve LinkedIn profile text using only the supplied "
-        "facts. Return a concise headline suggestion and an About-section "
-        "suggestion, then briefly explain the changes. Do not invent experience, "
-        "skills, credentials, or results; use clear placeholders where details "
-        "are missing."
     ),
     "improve_job_description": (
         "Help an employer improve the supplied job description for clarity, "
@@ -90,22 +78,6 @@ AI_TASKS = {
         "rank or make hiring decisions about people."
     ),
 }
-
-STOP_WORDS = {
-    "the", "and", "for", "with", "that", "this", "from",
-    "are", "you", "your", "our", "will", "have", "has",
-    "was", "were", "their", "they", "job", "work", "role",
-    "required", "requirements", "candidate", "ability"
-}
-
-
-def extract_keywords(text):
-    words = re.findall(r"[a-zA-Z][a-zA-Z+#.]*", text.lower())
-    return {
-        word for word in words
-        if len(word) > 1 and word not in STOP_WORDS
-    }
-
 
 @app.route("/")
 def home():
@@ -281,6 +253,56 @@ def supabase_rest_request(path, method="GET", payload=None):
 
 def learning_supabase_request(path, method="GET", payload=None):
     return supabase_rest_request(path, method, payload)
+
+
+def send_notification_email(recipient, subject, body):
+    """Best-effort email delivery; in-app notifications remain authoritative."""
+    if not RESEND_API_KEY or not isinstance(recipient, str) or "@" not in recipient:
+        return False
+    email_request = Request(
+        "https://api.resend.com/emails",
+        data=json.dumps({
+            "from": NOTIFICATION_EMAIL_FROM,
+            "to": [recipient],
+            "subject": subject,
+            "text": body,
+        }).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(email_request, timeout=8):
+            return True
+    except (HTTPError, URLError, TimeoutError):
+        app.logger.warning("Could not deliver notification email to %s", recipient)
+        return False
+
+
+def ics_escape(value):
+    return str(value or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def interview_ics(application, interview_at):
+    parsed = datetime.fromisoformat(interview_at.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    start = parsed.astimezone(timezone.utc)
+    end = start + timedelta(minutes=30)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    start_value = start.strftime("%Y%m%dT%H%M%SZ")
+    end_value = end.strftime("%Y%m%dT%H%M%SZ")
+    summary = f"Interview: {application.get('job_title', 'CareerLens role')}"
+    description = f"CareerLens interview for {application.get('company', '')}."
+    return "\r\n".join([
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//CareerLens//Interview//EN",
+        "BEGIN:VEVENT", f"UID:{application.get('id')}@careerlens",
+        f"DTSTAMP:{stamp}", f"DTSTART:{start_value}", f"DTEND:{end_value}",
+        f"SUMMARY:{ics_escape(summary)}", f"DESCRIPTION:{ics_escape(description)}",
+        "END:VEVENT", "END:VCALENDAR", ""
+    ])
 
 
 def learning_proxy_response(status, payload, empty_message):
@@ -503,90 +525,6 @@ def extract_resume_text(pdf_bytes):
     if not resume_text:
         raise ResumePdfError("empty")
     return resume_text
-
-
-@app.route("/api/analyze-resume", methods=["POST"])
-def analyze_resume():
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
-
-    if "resume" not in request.files:
-        return jsonify({"error": "Please upload your resume PDF."}), 400
-
-    resume_file = request.files["resume"]
-    job_description = request.form.get("job_description", "").strip()
-
-    if not resume_file.filename:
-        return jsonify({"error": "Choose a PDF resume first."}), 400
-
-    if not resume_file.filename.lower().endswith(".pdf"):
-        return jsonify({"error": "Only PDF files are supported."}), 400
-
-    if not job_description:
-        return jsonify({"error": "Please paste the job description."}), 400
-
-    pdf_bytes = resume_file.read(MAX_FILE_SIZE + 1)
-
-    if len(pdf_bytes) > MAX_FILE_SIZE:
-        return jsonify({"error": "The PDF must be 5 MB or smaller."}), 400
-
-    try:
-        resume_text = extract_resume_text(pdf_bytes)
-    except ResumePdfError as error:
-        if error.reason == "encrypted":
-            message = "This PDF is password-protected. Upload an unlocked PDF."
-        elif error.reason == "empty":
-            message = "No readable text found. Try a text-based PDF rather than a scanned image."
-        else:
-            message = "We couldn't read this PDF. Please try another PDF."
-        return jsonify({"error": message}), 400
-
-    resume_keywords = extract_keywords(resume_text)
-    job_keywords = extract_keywords(job_description)
-
-    if not job_keywords:
-        return jsonify({
-            "error": "The job description doesn't contain enough readable keywords."
-        }), 400
-
-    matched = sorted(resume_keywords & job_keywords)
-    missing = sorted(job_keywords - resume_keywords)
-
-    score = round((len(matched) / len(job_keywords)) * 100) if job_keywords else 0
-
-    suggestions = []
-
-    if missing:
-        suggestions.append(
-            "Review the missing keywords and add relevant ones where they truthfully reflect your experience."
-        )
-
-    if score < 40:
-        suggestions.append(
-            "Tailor your skills and experience sections more closely to the job requirements."
-        )
-    elif score < 70:
-        suggestions.append(
-            "Improve alignment by highlighting relevant projects, tools, and achievements."
-        )
-    else:
-        suggestions.append(
-            "Your keyword alignment looks promising. Check that your experience and achievements are clearly explained."
-        )
-
-    if len(resume_text.split()) < 150:
-        suggestions.append(
-            "Your resume text is quite short. Make sure your relevant experience, projects, and education are included."
-        )
-
-    return jsonify({
-        "score": score,
-        "matched_keywords": matched,
-        "missing_keywords": missing,
-        "suggestions": suggestions,
-        "note": "This is a basic keyword-match estimate, not an official ATS score."
-    })
 
 
 @app.route("/api/skill-gap", methods=["POST"])
@@ -867,285 +805,6 @@ def delete_portfolio_project(project_id):
     return portfolio_proxy_response(status, payload)
 
 
-def validate_community_post(payload):
-    if not isinstance(payload, dict):
-        raise ValueError("Send the community post as a JSON object.")
-    allowed = {"title", "body", "category"}
-    if payload.keys() - allowed:
-        raise ValueError("The community post contains unsupported fields.")
-
-    title = payload.get("title")
-    body = payload.get("body")
-    category = payload.get("category")
-    if not isinstance(title, str) or not 5 <= len(title.strip()) <= 160:
-        raise ValueError("Post title must be between 5 and 160 characters.")
-    if not isinstance(body, str) or not 10 <= len(body.strip()) <= 5000:
-        raise ValueError("Post details must be between 10 and 5,000 characters.")
-    if not isinstance(category, str) or category not in COMMUNITY_CATEGORIES:
-        raise ValueError("Choose a valid community category.")
-    return {"title": title.strip(), "body": body.strip(), "category": category}
-
-
-def validate_community_comment(payload):
-    if not isinstance(payload, dict) or set(payload) != {"body"}:
-        raise ValueError("Provide the comment text.")
-    body = payload.get("body")
-    if not isinstance(body, str) or not 2 <= len(body.strip()) <= 2000:
-        raise ValueError("Comment text must be between 2 and 2,000 characters.")
-    return {"body": body.strip()}
-
-
-def community_proxy_response(status, payload, missing_message):
-    code = payload.get("code") if isinstance(payload, dict) else None
-    if code in {"42P01", "PGRST200", "PGRST204", "PGRST205"}:
-        return jsonify({
-            "error": (
-                "The Community feature is not set up yet. Ask the project "
-                "administrator to run backend/migrations/phase9_community.sql "
-                "in the Supabase SQL Editor."
-            )
-        }), 503
-    if status in (401, 403):
-        return jsonify({"error": "Your session cannot access Community."}), status
-    if 200 <= status < 300:
-        return jsonify(payload if payload is not None else [])
-    if status == 409:
-        return jsonify({"error": "This item is already saved or reacted to."}), 409
-    app.logger.warning("Supabase community request failed with HTTP %s", status)
-    return jsonify({"error": missing_message}), 502
-
-
-@app.route("/api/community/posts")
-def community_posts():
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
-
-    posts_status, posts = supabase_rest_request(
-        "community_posts?select=id,author_id,title,body,category,status,"
-        "is_pinned,created_at,updated_at&order=is_pinned.desc,created_at.desc"
-    )
-    if not 200 <= posts_status < 300:
-        return community_proxy_response(
-            posts_status, posts, "Could not load the Community feed."
-        )
-    if not isinstance(posts, list):
-        return jsonify({"error": "The Community feed response was invalid."}), 502
-
-    post_ids = [post["id"] for post in posts if isinstance(post, dict) and post.get("id")]
-    author_ids = list({post["author_id"] for post in posts if post.get("author_id")})
-
-    comments_status, comments = supabase_rest_request(
-        "community_comments?select=id,post_id,author_id,body,created_at,updated_at"
-        "&order=created_at.asc"
-    )
-    reactions_status, reactions = supabase_rest_request(
-        "community_reactions?select=post_id,user_id,reaction,created_at"
-    )
-    saved_status, saved = supabase_rest_request(
-        "community_saved_posts?select=post_id,user_id,created_at"
-    )
-
-    accounts_status, accounts = supabase_rest_request(
-        "user_accounts?select=user_id,display_name,account_type"
-    )
-    if not all(
-        200 <= status < 300
-        for status in (comments_status, reactions_status, saved_status, accounts_status)
-    ):
-        if comments_status >= 500 or reactions_status >= 500 or saved_status >= 500:
-            return jsonify({"error": "Could not load Community activity."}), 502
-
-    comments = comments if isinstance(comments, list) else []
-    reactions = reactions if isinstance(reactions, list) else []
-    saved = saved if isinstance(saved, list) else []
-    accounts = accounts if isinstance(accounts, list) else []
-    account_by_id = {
-        account["user_id"]: account
-        for account in accounts
-        if isinstance(account, dict) and account.get("user_id")
-    }
-    comments_by_post = {post_id: [] for post_id in post_ids}
-    for comment in comments:
-        if comment.get("post_id") in comments_by_post:
-            account = account_by_id.get(comment.get("author_id"), {})
-            comments_by_post[comment["post_id"]].append({
-                **comment,
-                "author_name": account.get("display_name") or "CareerLens member",
-                "author_type": account.get("account_type") or "member",
-            })
-
-    reactions_by_post = {post_id: [] for post_id in post_ids}
-    for reaction in reactions:
-        if reaction.get("post_id") in reactions_by_post:
-            reactions_by_post[reaction["post_id"]].append(reaction)
-
-    saved_post_ids = {
-        item["post_id"]
-        for item in saved
-        if isinstance(item, dict) and item.get("post_id")
-    }
-    for post in posts:
-        author = account_by_id.get(post.get("author_id"), {})
-        post["author_name"] = author.get("display_name") or "CareerLens member"
-        post["author_type"] = author.get("account_type") or "member"
-        post["comments"] = comments_by_post.get(post["id"], [])
-        post["reactions"] = reactions_by_post.get(post["id"], [])
-        post["is_saved"] = post["id"] in saved_post_ids
-
-    return jsonify(posts)
-
-
-@app.route("/api/community/posts", methods=["POST"])
-def create_community_post():
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
-    if not request.is_json:
-        return jsonify({"error": "Send the Community post as JSON."}), 400
-    try:
-        values = validate_community_post(request.get_json())
-    except (BadRequest, ValueError) as error:
-        return jsonify({"error": str(error) or "The Community post is invalid."}), 400
-
-    status, payload = supabase_rest_request(
-        "community_posts", method="POST", payload=values
-    )
-    return community_proxy_response(status, payload, "Could not publish your post.")
-
-
-@app.route("/api/community/posts/<string:post_id>", methods=["PATCH"])
-def update_community_post(post_id):
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
-    try:
-        post_id = validate_learning_id(post_id, "Post ID")
-        if not request.is_json:
-            raise ValueError("Send the Community post changes as JSON.")
-        values = validate_community_post(request.get_json())
-    except (BadRequest, ValueError) as error:
-        return jsonify({"error": str(error) or "The Community post is invalid."}), 400
-    status, payload = supabase_rest_request(
-        f"community_posts?id=eq.{post_id}", method="PATCH", payload=values
-    )
-    if status in (200, 204) and not payload:
-        return jsonify({"error": "That Community post was not found."}), 404
-    return community_proxy_response(status, payload, "Could not update the post.")
-
-
-@app.route("/api/community/posts/<string:post_id>", methods=["DELETE"])
-def delete_community_post(post_id):
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
-    try:
-        post_id = validate_learning_id(post_id, "Post ID")
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    status, payload = supabase_rest_request(
-        f"community_posts?id=eq.{post_id}", method="DELETE"
-    )
-    if status in (200, 204) and not payload:
-        return jsonify({"error": "That Community post was not found."}), 404
-    return community_proxy_response(status, payload, "Could not delete the post.")
-
-
-@app.route("/api/community/posts/<string:post_id>/comments", methods=["POST"])
-def create_community_comment(post_id):
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
-    try:
-        post_id = validate_learning_id(post_id, "Post ID")
-        if not request.is_json:
-            raise ValueError("Send the comment as JSON.")
-        values = validate_community_comment(request.get_json())
-    except (BadRequest, ValueError) as error:
-        return jsonify({"error": str(error) or "The comment is invalid."}), 400
-    values["post_id"] = post_id
-    status, payload = supabase_rest_request(
-        "community_comments", method="POST", payload=values
-    )
-    return community_proxy_response(status, payload, "Could not add the comment.")
-
-
-@app.route("/api/community/comments/<string:comment_id>", methods=["DELETE"])
-def delete_community_comment(comment_id):
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
-    try:
-        comment_id = validate_learning_id(comment_id, "Comment ID")
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    status, payload = supabase_rest_request(
-        f"community_comments?id=eq.{comment_id}", method="DELETE"
-    )
-    if status in (200, 204) and not payload:
-        return jsonify({"error": "That comment was not found."}), 404
-    return community_proxy_response(status, payload, "Could not delete the comment.")
-
-
-@app.route("/api/community/posts/<string:post_id>/reactions", methods=["POST"])
-def add_community_reaction(post_id):
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
-    try:
-        post_id = validate_learning_id(post_id, "Post ID")
-        payload = request.get_json(silent=True)
-        reaction = payload.get("reaction") if isinstance(payload, dict) else None
-        if reaction not in COMMUNITY_REACTIONS:
-            raise ValueError("Choose a valid Community reaction.")
-    except (BadRequest, ValueError) as error:
-        return jsonify({"error": str(error) or "The reaction is invalid."}), 400
-    status, result = supabase_rest_request(
-        "community_reactions",
-        method="POST",
-        payload={"post_id": post_id, "reaction": reaction},
-    )
-    return community_proxy_response(status, result, "Could not add the reaction.")
-
-
-@app.route("/api/community/posts/<string:post_id>/reactions/<string:reaction>", methods=["DELETE"])
-def remove_community_reaction(post_id, reaction):
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
-    try:
-        post_id = validate_learning_id(post_id, "Post ID")
-        if reaction not in COMMUNITY_REACTIONS:
-            raise ValueError("Choose a valid Community reaction.")
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    status, payload = supabase_rest_request(
-        f"community_reactions?post_id=eq.{post_id}&reaction=eq.{reaction}",
-        method="DELETE",
-    )
-    return community_proxy_response(status, payload, "Could not remove the reaction.")
-
-
-@app.route("/api/community/posts/<string:post_id>/saved", methods=["POST", "DELETE"])
-def toggle_community_saved(post_id):
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
-    try:
-        post_id = validate_learning_id(post_id, "Post ID")
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    if request.method == "POST":
-        status, payload = supabase_rest_request(
-            "community_saved_posts", method="POST", payload={"post_id": post_id}
-        )
-    else:
-        status, payload = supabase_rest_request(
-            f"community_saved_posts?post_id=eq.{post_id}", method="DELETE"
-        )
-    return community_proxy_response(status, payload, "Could not update the saved post.")
-
-
 @app.route("/api/learning/recommendations", methods=["POST"])
 def learning_recommendations():
     error_response = verify_supabase_job_seeker()
@@ -1290,6 +949,446 @@ def interview_prep():
     return jsonify(build_interview_prep(role, company, job_description))
 
 
+@app.route("/api/application-materials/<string:job_id>", methods=["GET"])
+def get_application_materials(job_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    try:
+        job_id = validate_learning_id(job_id, "Job listing ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    status, payload = supabase_rest_request(
+        f"application_material_drafts?select=job_id,bullets,cover_letter,updated_at&job_id=eq.{job_id}"
+    )
+    if status in (401, 403):
+        return jsonify({"error": "Your session cannot access these application materials."}), status
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if code in {"42P01", "PGRST200", "PGRST205"}:
+        return jsonify({
+            "error": "Application materials are not set up yet. Run backend/migrations/phase15_application_materials.sql in Supabase."
+        }), 503
+    if not 200 <= status < 300:
+        return jsonify({"error": "Could not load saved application materials."}), 502
+    return jsonify(payload[0] if isinstance(payload, list) and payload else None)
+
+
+@app.route("/api/provider-applicant-rankings")
+def provider_applicant_rankings():
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+
+    applications_status, applications = supabase_rest_request(
+        "job_applications?select=id,job_id,applicant_id,created_at"
+        "&order=created_at.desc"
+    )
+    if not 200 <= applications_status < 300:
+        return jsonify({"error": "Could not load applicant rankings."}), 502
+    if not isinstance(applications, list) or not applications:
+        return jsonify({"rankings": []})
+
+    applicant_ids = sorted({
+        item.get("applicant_id")
+        for item in applications
+        if isinstance(item, dict) and item.get("applicant_id")
+    })
+    job_ids = sorted({
+        item.get("job_id")
+        for item in applications
+        if isinstance(item, dict) and item.get("job_id")
+    })
+    if not applicant_ids or not job_ids:
+        return jsonify({"rankings": []})
+
+    profiles_status, profiles = supabase_rest_request(
+        "career_profiles?select=user_id,target_role,headline,about,skills"
+        f"&user_id=in.({','.join(applicant_ids)})"
+    )
+    projects_status, projects = supabase_rest_request(
+        "career_projects?select=user_id,title,description,skills,contribution"
+        f"&user_id=in.({','.join(applicant_ids)})"
+        "&order=updated_at.desc"
+    )
+    jobs_status, jobs = supabase_rest_request(
+        "job_listings?select=id,title,company,description,requirements"
+        f"&id=in.({','.join(job_ids)})"
+    )
+    if not all(200 <= status < 300 for status in (profiles_status, projects_status, jobs_status)):
+        return jsonify({
+            "error": (
+                "Applicant ranking is not set up yet. Run "
+                "backend/migrations/phase16_provider_applicant_ranking.sql in Supabase."
+            )
+        }), 503
+
+    profiles_by_id = {
+        item["user_id"]: item for item in profiles
+        if isinstance(item, dict) and item.get("user_id")
+    }
+    projects_by_user = {}
+    for project in projects:
+        if isinstance(project, dict) and project.get("user_id"):
+            projects_by_user.setdefault(project["user_id"], []).append(project)
+    jobs_by_id = {
+        item["id"]: item for item in jobs
+        if isinstance(item, dict) and item.get("id")
+    }
+
+    rankings = []
+    for application in applications:
+        if not isinstance(application, dict):
+            continue
+        job = jobs_by_id.get(application.get("job_id"))
+        if not job:
+            continue
+        profile = dict(profiles_by_id.get(application.get("applicant_id"), {}))
+        profile["project_evidence"] = projects_by_user.get(
+            application.get("applicant_id"), []
+        )
+        match_result = build_job_recommendations([job], profile)
+        match = match_result["jobs"][0]["match"] if match_result["jobs"] else None
+        rankings.append({
+            "application_id": application.get("id"),
+            "job_id": application.get("job_id"),
+            "score": match["score"] if match else None,
+            "match": match,
+        })
+
+    rankings.sort(
+        key=lambda item: item["score"] if item["score"] is not None else -1,
+        reverse=True,
+    )
+    return jsonify({"rankings": rankings})
+
+
+@app.route("/api/provider/job-applications/<string:application_id>/status", methods=["PATCH"])
+def update_provider_application_status(application_id):
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    try:
+        application_id = validate_learning_id(application_id, "Application ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    payload = request.get_json(silent=True)
+    status = payload.get("status") if isinstance(payload, dict) else None
+    allowed_statuses = {"Submitted", "CV review", "Shortlisted", "Interview", "Offer", "Hired", "Rejected"}
+    if status not in allowed_statuses:
+        return jsonify({"error": "Choose a valid hiring stage."}), 400
+    update_status, updated = supabase_rest_request(
+        f"job_applications?id=eq.{application_id}",
+        method="PATCH",
+        payload={"status": status},
+    )
+    if not 200 <= update_status < 300 or not isinstance(updated, list) or not updated:
+        return jsonify({"error": "Could not update the applicant status."}), 502
+    application = updated[0]
+    if status in {"Shortlisted", "Interview", "Rejected"}:
+        send_notification_email(
+            application.get("applicant_email"),
+            f"CareerLens application update: {status}",
+            f"Your application for {application.get('job_title', 'this role')} at "
+            f"{application.get('company', 'the company')} is now {status}.",
+        )
+    return jsonify({"application": application})
+
+
+@app.route("/api/provider/application-reviews/<string:application_id>", methods=["POST"])
+def save_provider_application_review(application_id):
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    try:
+        application_id = validate_learning_id(application_id, "Application ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Send review details as JSON."}), 400
+    notes = payload.get("reviewer_notes", "")
+    interview_at = payload.get("interview_at")
+    if not isinstance(notes, str) or len(notes) > 4000:
+        return jsonify({"error": "Reviewer notes must be 4,000 characters or fewer."}), 400
+    if interview_at is not None:
+        if not isinstance(interview_at, str):
+            return jsonify({"error": "Interview date must be a valid timestamp."}), 400
+        try:
+            datetime.fromisoformat(interview_at.replace("Z", "+00:00"))
+        except ValueError:
+            return jsonify({"error": "Interview date must be a valid timestamp."}), 400
+    application_status, applications = supabase_rest_request(
+        "job_applications?select=id,job_title,company,applicant_email"
+        f"&id=eq.{application_id}"
+    )
+    if not 200 <= application_status < 300 or not applications:
+        return jsonify({"error": "Could not find this application."}), 404
+    review_payload = {
+        "application_id": application_id,
+        "reviewer_notes": notes.strip(),
+        "interview_at": interview_at,
+    }
+    update_status, updated = supabase_rest_request(
+        f"application_reviews?application_id=eq.{application_id}",
+        method="PATCH",
+        payload={"reviewer_notes": notes.strip(), "interview_at": interview_at},
+    )
+    if not 200 <= update_status < 300:
+        return jsonify({"error": "Could not save the interview details."}), 502
+    if not updated:
+        save_status, updated = supabase_rest_request(
+            "application_reviews", method="POST", payload=review_payload
+        )
+        if not 200 <= save_status < 300:
+            return jsonify({"error": "Could not save the interview details."}), 502
+    application = applications[0]
+    if interview_at:
+        send_notification_email(
+            application.get("applicant_email"),
+            "CareerLens interview scheduled",
+            f"An interview for {application.get('job_title', 'your application')} at "
+            f"{application.get('company', 'the company')} is scheduled for {interview_at}. "
+            "Your CareerLens notifications include a calendar download.",
+        )
+    return jsonify({"review": updated[0] if isinstance(updated, list) and updated else {}})
+
+
+@app.route("/api/notifications")
+def notifications():
+    _, error_response = verify_supabase_user()
+    if error_response:
+        return error_response
+    status, records = supabase_rest_request(
+        "notifications?select=id,notification_type,title,body,data,read_at,created_at"
+        "&order=created_at.desc&limit=50"
+    )
+    if not 200 <= status < 300:
+        return jsonify({"error": "Notifications are not set up yet. Run backend/migrations/phase16_provider_applicant_ranking.sql in Supabase."}), 503
+    items = records if isinstance(records, list) else []
+    today = date.today().isoformat()
+    follow_status, follow_ups = supabase_rest_request(
+        "applications?select=id,title,company,follow_up_on&follow_up_on=not.is.null"
+        f"&follow_up_on=lte.{today}&status=not.in.(Offer,Rejected)"
+    )
+    if 200 <= follow_status < 300 and isinstance(follow_ups, list):
+        items.extend({
+            "id": f"follow-up:{item.get('id')}:{item.get('follow_up_on')}",
+            "notification_type": "follow_up",
+            "title": "Follow-up reminder",
+            "body": f"Follow up on {item.get('title', 'your application')} at {item.get('company', 'the company')}.",
+            "data": {"application_id": item.get("id")},
+            "read_at": None,
+            "created_at": f"{item.get('follow_up_on')}T00:00:00Z",
+        } for item in follow_ups)
+    items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return jsonify({"notifications": items[:50]})
+
+
+@app.route("/api/notifications/<string:notification_id>/read", methods=["PATCH"])
+def mark_notification_read(notification_id):
+    _, error_response = verify_supabase_user()
+    if error_response:
+        return error_response
+    try:
+        notification_id = validate_learning_id(notification_id, "Notification ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    status, records = supabase_rest_request(
+        f"notifications?id=eq.{notification_id}",
+        method="PATCH",
+        payload={"read_at": datetime.now(timezone.utc).isoformat()},
+    )
+    if not 200 <= status < 300:
+        return jsonify({"error": "Could not mark this notification read."}), 502
+    return jsonify({"notification": records[0] if isinstance(records, list) and records else None})
+
+
+@app.route("/api/job-applications/<string:application_id>/interview.ics")
+def download_interview_calendar(application_id):
+    _, error_response = verify_supabase_user()
+    if error_response:
+        return error_response
+    try:
+        application_id = validate_learning_id(application_id, "Application ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    app_status, applications = supabase_rest_request(
+        "job_applications?select=id,job_title,company"
+        f"&id=eq.{application_id}"
+    )
+    review_status, reviews = supabase_rest_request(
+        "application_reviews?select=interview_at"
+        f"&application_id=eq.{application_id}"
+    )
+    if not 200 <= app_status < 300 or not applications:
+        return jsonify({"error": "No interview date is available for this application."}), 404
+    interview_at = reviews[0].get("interview_at") if isinstance(reviews, list) and reviews else None
+    if not interview_at:
+        notification_status, notifications = supabase_rest_request(
+            "notifications?select=data&notification_type=eq.interview_scheduled"
+        )
+        if 200 <= notification_status < 300 and isinstance(notifications, list):
+            interview_at = next(
+                (
+                    item.get("data", {}).get("interview_at")
+                    for item in notifications
+                    if isinstance(item, dict)
+                    and isinstance(item.get("data"), dict)
+                    and item["data"].get("application_id") == application_id
+                ),
+                None,
+            )
+    if not interview_at:
+        return jsonify({"error": "No interview date is available for this application."}), 404
+    response = app.make_response(interview_ics(applications[0], interview_at))
+    response.headers["Content-Type"] = "text/calendar; charset=utf-8"
+    response.headers["Content-Disposition"] = f"attachment; filename=careerlens-interview-{application_id}.ics"
+    return response
+
+
+@app.route("/api/application-materials", methods=["POST"])
+def generate_application_materials():
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    if not request.is_json:
+        return jsonify({"error": "Send application material details as JSON."}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Send application material details as JSON."}), 400
+    if payload.get("consent") is not True:
+        return jsonify({"error": "Confirm that you want to send the selected profile and job details to Gemini."}), 400
+    try:
+        job_id = validate_learning_id(payload.get("job_id"), "Job listing ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    if not GEMINI_API_KEY:
+        return jsonify({"error": "Gemini AI is not configured. Add GEMINI_API_KEY to backend/.env and restart the app."}), 503
+
+    job_status, jobs = supabase_rest_request(
+        f"job_listings?select=id,title,company,location,workplace_type,employment_type,description,requirements,status&id=eq.{job_id}&status=eq.published"
+    )
+    profile_status, profiles = supabase_rest_request(
+        "career_profiles?select=current_position,target_role,headline,about,skills,location,phone,education"
+    )
+    project_status, projects = supabase_rest_request(
+        "career_projects?select=title,description,skills,contribution,project_url,started_on,completed_on&order=updated_at.desc"
+    )
+    account_status, accounts = supabase_rest_request(
+        "user_accounts?select=display_name"
+    )
+    if not all(200 <= status < 300 for status in (job_status, profile_status, project_status, account_status)):
+        missing_codes = [
+            payload_item.get("code")
+            for payload_item in (jobs, profiles, projects, accounts)
+            if isinstance(payload_item, dict)
+        ]
+        if "PGRST205" in missing_codes or "42P01" in missing_codes:
+            return jsonify({"error": "A required profile or listing migration is missing."}), 503
+        return jsonify({"error": "Could not load the profile and job details."}), 502
+    if not isinstance(jobs, list) or not jobs:
+        return jsonify({"error": "Choose a published job listing."}), 404
+    job = jobs[0]
+    profile = profiles[0] if isinstance(profiles, list) and profiles else {}
+    projects = projects if isinstance(projects, list) else []
+    candidate_name = (
+        accounts[0].get("display_name", "").strip()
+        if isinstance(accounts, list) and accounts and isinstance(accounts[0], dict)
+        else ""
+    )
+
+    profile_text = json.dumps({
+        "name": candidate_name,
+        "current_position": profile.get("current_position", ""),
+        "target_role": profile.get("target_role", ""),
+        "headline": profile.get("headline", ""),
+        "about": profile.get("about", ""),
+        "skills": profile.get("skills", []),
+        "education": profile.get("education", ""),
+        "projects": projects,
+    }, ensure_ascii=False)
+    job_text = json.dumps(job, ensure_ascii=False)
+    prompt = (
+        "Create application materials for one real job from the supplied profile. "
+        "Use only facts present in the profile and projects. Never invent employers, "
+        "dates, metrics, qualifications, degrees, certifications, or achievements. "
+        "If evidence is missing, use a restrained gap placeholder or omit the claim. "
+        "Return valid JSON only with this shape: "
+        '{"bullets":["..."],"cover_letter":"..."}\n\n'
+        f"Candidate and profile:\n{profile_text}\n\n"
+        f"Job listing:\n{job_text}"
+    )
+    gemini_request = Request(
+        "https://generativelanguage.googleapis.com/v1beta/interactions",
+        data=json.dumps({
+            "model": GEMINI_MODEL,
+            "input": prompt,
+            "generation_config": {"thinking_level": "low", "max_output_tokens": 2200},
+            "store": False,
+        }).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+        method="POST",
+    )
+    try:
+        with urlopen(gemini_request, timeout=30) as response:
+            provider_payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        if error.code in {429, 503} or error.code >= 500:
+            return jsonify({"error": "Gemini is temporarily busy. Please try again shortly."}), 503
+        return jsonify({"error": "Gemini could not process this request. Check the API key and try again."}), 502
+    except (URLError, TimeoutError):
+        return jsonify({"error": "Could not reach Gemini. Check your connection and try again."}), 503
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return jsonify({"error": "Gemini returned an unreadable response. Please try again."}), 502
+
+    answer = "\n".join(
+        item["text"]
+        for step in provider_payload.get("steps", [])
+        if isinstance(step, dict) and step.get("type") == "model_output"
+        and isinstance(step.get("content"), list)
+        for item in step["content"]
+        if isinstance(item, dict) and item.get("type") == "text"
+        and isinstance(item.get("text"), str)
+    ).strip()
+    if not answer:
+        return jsonify({"error": "Gemini did not return application materials."}), 502
+    try:
+        clean_answer = answer.strip()
+        if clean_answer.startswith("```"):
+            clean_answer = clean_answer.strip("`")
+            if clean_answer.lower().startswith("json"):
+                clean_answer = clean_answer[4:].lstrip()
+        materials = json.loads(clean_answer)
+    except json.JSONDecodeError:
+        return jsonify({"error": "Gemini returned invalid application material content."}), 502
+    bullets = materials.get("bullets") if isinstance(materials, dict) else None
+    cover_letter = materials.get("cover_letter") if isinstance(materials, dict) else None
+    if not isinstance(bullets, list) or not all(isinstance(bullet, str) for bullet in bullets):
+        return jsonify({"error": "Gemini returned an invalid bullet list."}), 502
+    if not isinstance(cover_letter, str) or len(cover_letter.strip()) < 40:
+        return jsonify({"error": "Gemini returned an invalid cover letter."}), 502
+    bullets = [bullet.strip() for bullet in bullets if bullet.strip()][:8]
+    supabase_rest_request(
+        f"application_material_drafts?job_id=eq.{job_id}",
+        method="DELETE",
+    )
+    save_status, saved = supabase_rest_request(
+        "application_material_drafts",
+        method="POST",
+        payload={
+            "job_id": job_id,
+            "bullets": bullets,
+            "cover_letter": cover_letter.strip(),
+        },
+    )
+    if not 200 <= save_status < 300:
+        code = saved.get("code") if isinstance(saved, dict) else None
+        if code in {"42P01", "PGRST205"}:
+            return jsonify({"error": "Application materials are not set up yet. Run backend/migrations/phase15_application_materials.sql in Supabase."}), 503
+        return jsonify({"error": "The materials were generated but could not be saved."}), 502
+    return jsonify({"job_id": job_id, "bullets": bullets, "cover_letter": cover_letter.strip()})
+
+
 @app.route("/api/ai-assist", methods=["POST"])
 def ai_assist():
     _, error_response = verify_supabase_user()
@@ -1322,12 +1421,12 @@ def ai_assist():
     if not isinstance(text, str):
         return jsonify({"error": "Enter the text you want Gemini to review."}), 400
     text = text.strip()
-    minimum_text_length = 2 if task == "career_coach" else 40
+    minimum_text_length = 2 if task == "ask_question" else 40
     if len(text) < minimum_text_length:
         return jsonify({
             "error": (
                 "Enter a little more detail for useful guidance."
-                if task == "career_coach"
+                if task == "ask_question"
                 else "Enter at least 40 characters for useful feedback."
             )
         }), 400

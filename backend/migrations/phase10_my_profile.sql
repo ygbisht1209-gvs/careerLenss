@@ -2,10 +2,7 @@ alter table public.career_profiles
     add column if not exists current_position text not null default '',
     add column if not exists location text not null default '',
     add column if not exists phone text not null default '',
-    add column if not exists education text not null default '',
-    add column if not exists linkedin_target_role_draft text,
-    add column if not exists linkedin_headline_draft text,
-    add column if not exists linkedin_about_draft text;
+    add column if not exists education text not null default '';
 
 notify pgrst, 'reload schema';
 

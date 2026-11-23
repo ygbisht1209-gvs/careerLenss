@@ -16,6 +16,20 @@ subject to Supabase grants and RLS. Status/error details below reflect route
 logic in the repository; actual behavior of a remote Supabase project has not
 been verified.
 
+### `GET /api/application-materials/<job_id>`
+
+- **Purpose:** Load the signed-in job seeker's saved résumé bullets and cover letter for one listing.
+- **Authentication:** Authenticated job seeker.
+- **Success:** `200` with `job_id`, `bullets`, `cover_letter`, and `updated_at`, or `null` when no draft exists.
+
+### `POST /api/application-materials`
+
+- **Purpose:** Generate and privately save job-specific résumé bullets and a cover letter from the signed-in profile, portfolio, and published listing.
+- **Authentication:** Authenticated job seeker.
+- **Input JSON:** `job_id` (UUID) and `consent: true`.
+- **Success:** `200` with `job_id`, `bullets`, and `cover_letter`.
+- **Data handling:** The profile and listing are assembled server-side and sent to Gemini only after consent. The generated draft is saved in the private `application_material_drafts` table.
+
 ## 2. Public endpoints
 
 ### `GET /`
@@ -45,21 +59,6 @@ been verified.
   RLS. Do not put a service-role key here.
 
 ## 3. Authenticated analysis endpoints
-
-### `POST /api/analyze-resume`
-
-- **Purpose:** Compare readable PDF text with a supplied job description.
-- **Authentication:** Any authenticated Supabase user.
-- **Input:** Multipart fields `resume` (PDF, max 5 MiB) and
-  `job_description` (non-empty text).
-- **Success:** `200` with `score` (integer), `matched_keywords` (string
-  array), `missing_keywords` (string array), `suggestions` (string array), and
-  `note` (method limitation).
-- **Errors:** `400` for missing/invalid file, unreadable/encrypted/no-text PDF,
-  or unusable job description; `401` unauthenticated/expired session; `413`
-  request limit; `502`/`503` authentication service errors.
-- **Data handling:** Analysis PDF is parsed in memory and is not stored by this
-  route. Score is keyword overlap, not an ATS score.
 
 ### `POST /api/skill-gap`
 
@@ -99,8 +98,8 @@ been verified.
   require provider role.
 - **Input JSON:** `task`, `role` (2–120 chars), `text` (maximum 8,000 chars),
   and `consent: true`. Supported tasks are `resume_feedback`,
-  `interview_answer`, `career_coach`, `improve_job_description`, and
-  `interview_kit`. Career-coach text has a 2-character minimum; other tasks
+  `interview_answer`, `ask_question`, `improve_job_description`, and
+  `interview_kit`. Ask-a-question text has a 2-character minimum; other tasks
   require 40 characters.
 - **Success:** `200 {"answer": "..."}`.
 - **Errors:** `400` invalid payload, unsupported task, invalid text, or missing

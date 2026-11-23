@@ -25,7 +25,7 @@ user-consented career-assistance requests are sent from Flask to the Google
 Gemini Interactions API.
 
 The repository includes personal application tracking and career profiles,
-résumé keyword analysis, explainable skill-gap analysis, a learning-resource
+explainable skill-gap analysis, a learning-resource
 catalogue and personal learning plans, deterministic profile-to-job evidence
 matching, provider job and applicant workflows, portfolio projects, dashboard
 summaries, interview-practice generation, and optional AI assistance. The
@@ -170,7 +170,6 @@ or live production deployment.
 | Email/password sign-up and sign-in, email verification, password reset | Implemented through Supabase client; live provider flow not verified |
 | Role-specific seeker/provider workspace | Implemented; live account/RLS behavior not verified |
 | Career profile and personal application tracker | Implemented with direct Supabase client operations; live persistence not verified |
-| PDF résumé keyword analysis | Implemented as an authenticated Flask endpoint; locally tested with generated PDF fixtures |
 | Skill-gap analysis with evidence explanations | Implemented with deterministic skill vocabulary and supplied profile/resume/experience/project context |
 | Learning catalogue and personal plan | Implemented; catalogue data and persistence require Phase 3 migration and Supabase |
 | Explainable job recommendations | Implemented as deterministic text/evidence scoring; live records not verified |
@@ -262,20 +261,17 @@ represent a verified deployed topology.
 2. **Direct database operations:** profile, personal applications, listings,
    job applications, and provider review data use the Supabase JavaScript
    client and the current user's session. RLS is intended to constrain rows.
-3. **Résumé analysis:** the browser posts a PDF and job description to Flask;
-   Flask verifies the user, parses PDF text in memory, computes keyword
-   overlap, and returns a score, matched/missing terms, and suggestions.
-4. **Skill analysis:** an authenticated seeker submits a role, job text, and
+3. **Skill analysis:** an authenticated seeker submits a role, job text, and
    optional skills, experience, résumé PDF; Flask also retrieves that user's
    private portfolio through the authenticated proxy and returns evidence
    categories and explanations.
-5. **Job recommendations:** Flask retrieves the seeker's profile, projects,
+4. **Job recommendations:** Flask retrieves the seeker's profile, projects,
    published jobs, and learning records through Supabase; deterministic
    processing returns job explanations, profile status, and score details.
-6. **Learning and portfolio APIs:** Flask validates payloads and identifiers,
+5. **Learning and portfolio APIs:** Flask validates payloads and identifiers,
    forwards requests with the user's bearer token, and maps service errors to
    safe responses.
-7. **Gemini:** after explicit per-request consent, Flask sends the selected
+6. **Gemini:** after explicit per-request consent, Flask sends the selected
    text to Google with `store: false` and returns model text. CareerLens does
    not persist the request in its own application database.
 
@@ -374,26 +370,6 @@ tested against a live Supabase project. Provider registration is self-selected;
 no employer verification workflow is implemented.
 
 ### 6.2 Résumé analysis and application attachments
-
-**Purpose and users:** Seekers can compare a readable PDF with a job
-description; they can attach a PDF résumé to a job application.
-
-**Inputs and processing:** `/api/analyze-resume` accepts a PDF and job
-description. Flask verifies a Supabase bearer token, limits files to 5 MiB,
-parses text using `pypdf`, tokenizes recognized words, and computes
-`matched_keywords / job_keywords * 100` rounded to an integer. It returns the
-score, matched/missing keywords, suggestions, and an explicit caveat. The
-application flow uploads a PDF to Supabase Storage and inserts its object path
-into `job_applications`.
-
-**Files and data:** `backend/app.py`,
-`backend/static/script.js`, `backend/templates/index.html`,
-`public.job_applications`, and the private `application-resumes` bucket.
-
-**Validation and limits:** The API validates PDF filename, byte limit, readable
-text, and job-description content. It does not perform OCR, create a résumé,
-or store PDF analysis inputs. Live upload/access permissions are not verified.
-The keyword score is not an official ATS score.
 
 ### 6.3 Skill-gap analysis
 
@@ -506,7 +482,7 @@ Practice state and downloaded worksheet generation are browser-side.
 ### 6.10 Optional AI assistance
 
 `POST /api/ai-assist` supports résumé feedback, interview-answer feedback,
-career coaching, job-description improvement, and interview-kit generation.
+open-ended questions, job-description improvement, and interview-kit generation.
 Flask requires authentication, validates input and explicit consent, and
 requires provider role for employer-only tasks. It sends a request to the
 Gemini Interactions API with a server-side key and `store: false`. Gemini text

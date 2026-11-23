@@ -17,7 +17,7 @@ scoped and explaining the limits of text-based analysis.
 
 - Provide seeker and provider workspaces.
 - Track personal applications, profiles, learning plans, and projects.
-- Analyze résumé/job-description text and explain recognized skill evidence.
+- Explain recognized skill evidence from profile and résumé context.
 - Compare explicit job requirements with profile evidence.
 - Support listings, applications, and employer review workflows.
 - Offer optional, user-consented Gemini assistance.
@@ -26,7 +26,6 @@ scoped and explaining the limits of text-based analysis.
 
 - Supabase email/password authentication and role-specific UI
 - Career profiles and personal application tracker
-- PDF résumé keyword analysis
 - Deterministic skill-gap analysis
 - Curated learning catalogue and personal learning plans
 - Explainable job matching and recommendations

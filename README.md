@@ -61,6 +61,22 @@ in the same Supabase project. The migration is rerunnable and inserts only
 resources whose exact provider URL is not already present. Its resources cover
 Python, JavaScript, HTML, CSS, React, Flask, SQL, PostgreSQL, Git, Docker,
 Pytest, and Jest.
+The catalogue also includes TypeScript, Node.js, Express, HTTP, Supabase,
+HTML forms, CSS Grid, GitHub, Docker Compose, unittest, and Cypress material.
+It now also includes Java, C++, Go, Rust, Vue.js, Angular, Next.js, Tailwind CSS,
+MongoDB, Redis, GitHub Actions, Kubernetes, Linux, Playwright, and web security
+testing material.
+The catalogue also covers data structures and algorithms, system design, data
+science, artificial intelligence, machine learning, deep learning, NLP, and
+responsible AI. Resources span beginner practice through advanced architecture
+and production concepts.
+The seed remains rerunnable: existing URLs are not duplicated, so re-running
+the migration will not create duplicate catalogue entries.
+
+Retired Community tables can be removed with the review-only,
+rerunnable [`backend/migrations/phase17_remove_community.sql`](backend/migrations/phase17_remove_community.sql).
+Review this migration before running it manually in Supabase; CareerLens does
+not execute migrations automatically.
 
 If an existing Learning migration shows
 `infinite recursion detected in policy for relation "user_learning_plans"`,
@@ -73,32 +89,16 @@ with security-definer helper functions.
 Click the signed-in account card at the bottom of the sidebar to open **My
 Profile**, where you can edit your name, current and target roles, headline,
 About section, skills, education, location, contact phone, and private projects. Career details are private to
-the account; the display name is also used on Community posts.
-**LinkedIn Optimizer** remains a separate workspace with independent LinkedIn
-drafts and optional, consent-based Gemini suggestions. Saving a LinkedIn draft
-does not overwrite the CareerLens profile.
+the account.
 After the base schema, run
 [`backend/migrations/phase10_my_profile.sql`](backend/migrations/phase10_my_profile.sql)
-in Supabase to add the new profile fields, independent LinkedIn draft fields,
-and keep the community display name in sync when a user changes their name. Run
+in Supabase to add the profile fields. Run
 it in the same Supabase project configured by `backend/.env`; it reloads the
 PostgREST schema cache after adding the fields.
 For employer accounts, run
 [`backend/migrations/phase11_employer_profile.sql`](backend/migrations/phase11_employer_profile.sql)
 to enable the Employer Profile page and show recruiters' names and job titles
 on published listings. Account email and phone remain private.
-
-## Career Community
-
-After running the base schema, run
-[`backend/migrations/phase9_community.sql`](backend/migrations/phase9_community.sql)
-in the same Supabase project to enable the authenticated Community workspace.
-The migration creates community posts, replies, reactions, and saved posts with
-Row Level Security. Both job seekers and employers can read and participate,
-users can edit or delete only their own posts and replies, and community
-authors are identified using the account's display name. The interface supports
-category and text filtering, latest and discussed sorting, saved-post filtering,
-helpful/insightful/celebration reactions, and community replies.
 
 After running the base schema, run
 [`backend/migrations/phase5_portfolio.sql`](backend/migrations/phase5_portfolio.sql)
@@ -194,8 +194,8 @@ SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
 GEMINI_API_KEY=YOUR_GEMINI_API_KEY
 ```
 
-The Gemini key is optional for the rest of the app, but required for Career AI
-Studio and the opt-in Career Coach. Create or view it in
+The Gemini key is optional for the rest of the app, but required for the
+opt-in AI Assistant. Create or view it in
 [Google AI Studio](https://aistudio.google.com/apikey).
 Keep it in `backend/.env`; never add it to frontend code, commit it, or paste it
 into chat. You can optionally set `GEMINI_MODEL` to a supported Gemini model;
@@ -298,8 +298,8 @@ deployment as proof that the project is production-ready.
    [`backend/supabase_schema.sql`](backend/supabase_schema.sql), then
    [`backend/migrations/phase3_learning.sql`](backend/migrations/phase3_learning.sql)
    , [`backend/migrations/phase5_portfolio.sql`](backend/migrations/phase5_portfolio.sql),
-   and [`backend/migrations/phase9_community.sql`](backend/migrations/phase9_community.sql)
-   if those features are needed. Review and run SQL manually; deployments do not
+   and [`backend/migrations/phase15_application_materials.sql`](backend/migrations/phase15_application_materials.sql).
+   Review and run SQL manually; deployments do not
    execute migrations. Confirm the private `application-resumes` bucket and
    policies remain enabled. Do not disable RLS or make the bucket public.
 8. Create the service and review its **Deploys** and **Logs** pages. Subsequent
@@ -391,12 +391,15 @@ applicant data.
   reviewer notes are private to the hiring provider.
 - An application pipeline with editable records, status filters, search,
   follow-up reminders, notes, job links, summary metrics, and CSV export.
+- Job-specific résumé bullets and a cover-letter draft workspace. Select a
+  published listing to generate materials from the saved My Profile and
+  portfolio projects. The draft is stored privately per job, and Gemini receives
+  profile/job text only after the user consents. Generated claims must be reviewed
+  and may not invent experience that is absent from the profile.
 - An authenticated Interview Prep Studio that creates role-focused question
   sets, practice notes, progress tracking, and a downloadable interview
   checklist from a job description. Input text is processed for the request
   and is not stored; prompts are practice ideas, not interview predictions.
-- PDF resume keyword comparison (the uploaded PDF is processed for the request
-  and is not stored).
 - Authenticated, job-seeker-only Skill Gap Analysis compares recognized
   requirements in a job description with profile skills, optional experience
   notes, and an optional uploaded résumé PDF. It distinguishes contextual
@@ -421,16 +424,11 @@ applicant data.
   description, with role-focused questions, STAR planning notes, progress
   tracking, and a downloadable worksheet. Prompts are generated locally from
   matched job-description terms; they are not predictions or AI advice.
-- LinkedIn profile drafting workspace and target-role skill keyword comparison.
-- Career Coach for open-ended career questions. Each question is sent to Google
-  Gemini only after the user explicitly consents for that reply. CareerLens does
-  not store the request; Google's data-handling terms apply. Suggestions may be
-  inaccurate and are not employment decisions.
-- Optional Career AI Studio powered by Gemini for job seekers (resume feedback and
-  interview-answer coaching) and employers (job-description improvements and
-  structured interview kits). The selected tool, target role, and text are sent
-  to Google only when the user explicitly consents for that request. CareerLens
-  does not store the AI request; Google's data-handling terms apply. Outputs are
+- Optional AI Assistant powered by Gemini with Résumé Feedback, Interview
+  Answers, and Ask a Question tabs for job seekers, plus employer job-description
+  and interview-kit tools. The selected tool, target role, and text are sent to
+  Google only when the user explicitly consents for that request. CareerLens does
+  not store the AI request; Google's data-handling terms apply. Outputs are
   suggestions, not employment decisions.
 
 The Flask development server is intended for local use only. For a hosted

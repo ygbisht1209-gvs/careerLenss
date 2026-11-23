@@ -51,17 +51,6 @@ class CareerLensApiTests(unittest.TestCase):
         self.auth_urlopen = self.auth_request.start()
         self.addCleanup(self.auth_request.stop)
 
-    def post_resume(self, content, filename="resume.pdf", job_description="Python SQL"):
-        return self.client.post(
-            "/api/analyze-resume",
-            headers={"Authorization": "Bearer valid-session"},
-            data={
-                "resume": (io.BytesIO(content), filename),
-                "job_description": job_description,
-            },
-            content_type="multipart/form-data",
-        )
-
     def post_interview_prep(self, payload):
         return self.client.post(
             "/api/interview-prep",
@@ -94,7 +83,15 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertEqual(page.headers["Cache-Control"], "no-store")
         self.assertIn(b"CareerLens", page.data)
-        self.assertIn(b"Career AI Studio", page.data)
+        self.assertIn(b"AI Assistant", page.data)
+        self.assertIn(b"R\xc3\xa9sum\xc3\xa9 Feedback", page.data)
+        self.assertIn(b"Interview Answers", page.data)
+        self.assertIn(b"Ask a Question", page.data)
+        self.assertNotIn(b"Career Coach", page.data)
+        self.assertNotIn(b"Career AI Studio", page.data)
+        self.assertNotIn(b"Community", page.data)
+        self.assertNotIn(b"LinkedIn Optimizer", page.data)
+        self.assertNotIn(b"assistant-workspace", page.data)
         self.assertIn(b"ai-assist-form", page.data)
         self.assertIn(b"ai-consent", page.data)
         self.assertIn(b'id="candidate-resume"', page.data)
@@ -114,9 +111,10 @@ class CareerLensApiTests(unittest.TestCase):
             page.data,
         )
         self.assertIn(b'id="browse-jobs"', page.data)
-        self.assertIn(b'href="#linkedin-workspace"', page.data)
-        self.assertIn(b">LinkedIn Optimizer</span>", page.data)
-        self.assertIn(b'data-page-title="LinkedIn Optimizer"', page.data)
+        self.assertIn(b'id="application-materials"', page.data)
+        self.assertIn(b'id="application-material-job"', page.data)
+        self.assertIn(b'id="application-material-bullets"', page.data)
+        self.assertIn(b'id="application-material-cover-letter"', page.data)
         self.assertIn(b'id="sidebar-profile-link" href="#my-profile"', page.data)
         self.assertIn(b'aria-label="Open profile"', page.data)
         self.assertIn(b'id="my-profile" data-page-view data-page-title="My Profile"', page.data)
@@ -136,13 +134,10 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertIn(b'id="employer-profile-phone"', page.data)
         self.assertIn(b"Your name and job title appear on your published job listings.", page.data)
         my_profile_section = page.data.split(b'id="my-profile" data-page-view', 1)[1].split(
-            b'id="linkedin-workspace"', 1
+            b'id="interview-prep-workspace"', 1
         )[0]
         self.assertIn(b'id="my-profile-form"', my_profile_section)
         self.assertIn(b'id="portfolio-form"', my_profile_section)
-        self.assertIn(b'id="profile-form"', page.data)
-        self.assertIn(b'id="linkedin-headline-draft"', page.data)
-        self.assertIn(b'id="linkedin-ai-form"', page.data)
         self.assertIn(b'id="current-skills"', page.data)
         self.assertIn(b"Edit skills in My Profile", page.data)
         self.assertIn(b'id="job-sort"', page.data)
@@ -185,9 +180,6 @@ class CareerLensApiTests(unittest.TestCase):
         portfolio = (
             repository_root / "backend" / "migrations" / "phase5_portfolio.sql"
         ).read_text(encoding="utf-8")
-        community = (
-            repository_root / "backend" / "migrations" / "phase9_community.sql"
-        ).read_text(encoding="utf-8")
 
         for table in (
             "applications",
@@ -196,6 +188,7 @@ class CareerLensApiTests(unittest.TestCase):
             "job_listings",
             "job_applications",
             "application_reviews",
+            "application_material_drafts",
         ):
             self.assertIn(
                 f"alter table public.{table} enable row level security", schema
@@ -209,15 +202,6 @@ class CareerLensApiTests(unittest.TestCase):
             )
             self.assertIn("(select auth.uid()) = user_id", sql)
             self.assertIn("(select public.is_job_seeker())", sql)
-        for table in (
-            "community_posts",
-            "community_comments",
-            "community_reactions",
-            "community_saved_posts",
-        ):
-            self.assertIn(
-                f"alter table public.{table} enable row level security", community
-            )
 
         self.assertIn("(select auth.uid()) = applicant_id", schema)
         self.assertIn("(select public.owns_job_listing(job_id))", schema)
@@ -250,52 +234,6 @@ class CareerLensApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("not configured", response.json["error"])
-
-    def test_resume_analysis_requires_configuration_and_bearer_token(self):
-        with patch.object(app_module, "SUPABASE_ANON_KEY", ""):
-            missing_config = self.client.post("/api/analyze-resume")
-        missing_token = self.client.post("/api/analyze-resume")
-
-        self.assertEqual(missing_config.status_code, 503)
-        self.assertEqual(missing_token.status_code, 401)
-        self.auth_urlopen.assert_not_called()
-
-    def test_resume_analysis_rejects_missing_or_invalid_upload_fields(self):
-        missing_file = self.client.post(
-            "/api/analyze-resume",
-            headers={"Authorization": "Bearer valid-session"},
-            data={"job_description": "Python SQL"},
-        )
-        unsupported_file = self.post_resume(b"not a pdf", "resume.txt")
-        missing_description = self.post_resume(create_pdf("Python SQL"), job_description="")
-
-        self.assertEqual(missing_file.status_code, 400)
-        self.assertIn("upload", missing_file.json["error"].lower())
-        self.assertEqual(unsupported_file.status_code, 400)
-        self.assertIn("PDF", unsupported_file.json["error"])
-        self.assertEqual(missing_description.status_code, 400)
-
-    def test_resume_analysis_rejects_oversized_and_unreadable_pdfs(self):
-        oversized = self.post_resume(b"x" * (app_module.MAX_FILE_SIZE + 1))
-        unreadable = self.post_resume(b"not a PDF")
-
-        self.assertEqual(oversized.status_code, 400)
-        self.assertIn("5 MB", oversized.json["error"])
-        self.assertEqual(unreadable.status_code, 400)
-        self.assertIn("couldn't read", unreadable.json["error"])
-
-    def test_resume_analysis_returns_keyword_match_and_suggestions(self):
-        response = self.post_resume(
-            create_pdf("Python developer SQL data analysis"),
-            job_description="Python SQL data analysis",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json["score"], 100)
-        self.assertEqual(response.json["matched_keywords"], ["analysis", "data", "python", "sql"])
-        self.assertEqual(response.json["missing_keywords"], [])
-        self.assertTrue(response.json["suggestions"])
-        self.assertIn("not an official ATS score", response.json["note"])
 
     def test_skill_gap_requires_authentication_and_job_seeker_role(self):
         unauthenticated = self.client.post("/api/skill-gap")
@@ -663,45 +601,6 @@ class CareerLensApiTests(unittest.TestCase):
             f"career_projects?id=eq.{project_id}",
         )
         self.assertEqual(proxy.call_args_list[1].kwargs["method"], "DELETE")
-
-    def test_community_post_validation_and_publish(self):
-        valid_post = {
-            "title": "How did you prepare for a technical interview?",
-            "body": "I would appreciate practical advice from people who recently completed a technical interview.",
-            "category": "Interview tips",
-        }
-        invalid_post = {**valid_post, "category": "Unlisted"}
-        with patch.object(
-            app_module, "verify_supabase_user", return_value=(True, None)
-        ), patch.object(
-            app_module,
-            "supabase_rest_request",
-            return_value=(201, [valid_post]),
-        ) as proxy:
-            valid = self.client.post(
-                "/api/community/posts",
-                headers={"Authorization": "Bearer valid-session"},
-                json=valid_post,
-            )
-            invalid = self.client.post(
-                "/api/community/posts",
-                headers={"Authorization": "Bearer valid-session"},
-                json=invalid_post,
-            )
-
-        self.assertEqual(valid.status_code, 200)
-        self.assertEqual(proxy.call_count, 1)
-        self.assertEqual(proxy.call_args.args[0], "community_posts")
-        self.assertEqual(proxy.call_args.kwargs["method"], "POST")
-        self.assertEqual(invalid.status_code, 400)
-        self.assertIn("category", invalid.json["error"].lower())
-
-    def test_community_comments_require_authentication(self):
-        unauthenticated = self.client.post(
-            "/api/community/posts/00000000-0000-0000-0000-000000000001/comments",
-            json={"body": "This is a useful perspective."},
-        )
-        self.assertEqual(unauthenticated.status_code, 401)
 
     def test_portfolio_project_api_requires_job_seeker_and_reports_missing_migration(self):
         role_error = ({"error": "Job seekers only."}, 403)
@@ -1093,6 +992,20 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertIn("where not exists", migration)
         self.assertIn("https://docs.python.org/3/tutorial/", migration)
         self.assertIn("https://docs.docker.com/learn/", migration)
+        self.assertIn("https://www.typescriptlang.org/docs/handbook/intro.html", migration)
+        self.assertIn("https://sqlbolt.com/", migration)
+        self.assertIn("https://docs.cypress.io/app/get-started/why-cypress", migration)
+        self.assertIn("https://docs.oracle.com/javase/tutorial/", migration)
+        self.assertIn("https://kubernetes.io/docs/tutorials/kubernetes-basics/", migration)
+        self.assertIn("https://playwright.dev/docs/intro", migration)
+        self.assertIn("https://owasp.org/www-project-web-security-testing-guide/", migration)
+        self.assertIn("('data-structures-algorithms', 'Data structures and algorithms')", migration)
+        self.assertIn("('system-design', 'System design')", migration)
+        self.assertIn("('data-science', 'Data science')", migration)
+        self.assertIn("('artificial-intelligence', 'Artificial intelligence')", migration)
+        self.assertIn("('machine-learning', 'Machine learning')", migration)
+        self.assertIn("https://developers.google.com/machine-learning/crash-course", migration)
+        self.assertIn("https://ocw.mit.edu/courses/6-006-introduction-to-algorithms-spring-2020/", migration)
         self.assertIn("notify pgrst, 'reload schema'", migration)
 
     def test_learning_policy_repair_uses_security_definer_helpers(self):
@@ -1108,33 +1021,6 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertIn("active_learning_resource", migration)
         self.assertNotIn("exists (\n                select 1\n                from public.user_learning_plans", migration)
         self.assertIn("notify pgrst, 'reload schema'", migration)
-
-    def test_resume_analysis_rejects_job_descriptions_without_keywords(self):
-        response = self.post_resume(
-            create_pdf("Python developer with relevant experience"),
-            job_description="the and for",
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("keywords", response.json["error"].lower())
-
-    def test_expired_supabase_session_is_reported_as_unauthorized(self):
-        self.auth_request.stop()
-        expired = HTTPError(
-            "https://example.supabase.co/auth/v1/user",
-            401,
-            "Unauthorized",
-            {},
-            io.BytesIO(b"{}"),
-        )
-        self.auth_request = patch("backend.app.urlopen", side_effect=expired)
-        self.auth_urlopen = self.auth_request.start()
-        self.addCleanup(self.auth_request.stop)
-
-        response = self.post_resume(create_pdf("Python SQL"))
-
-        self.assertEqual(response.status_code, 401)
-        self.assertIn("session has expired", response.json["error"])
 
     def test_interview_prep_requires_a_valid_session(self):
         response = self.client.post(
@@ -1201,6 +1087,44 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertEqual(long_description.status_code, 400)
         self.assertEqual(invalid_company.status_code, 400)
 
+    def test_application_materials_require_explicit_consent_and_valid_job_id(self):
+        with patch.object(app_module, "verify_supabase_job_seeker", return_value=None):
+            no_consent = self.client.post(
+                "/api/application-materials",
+                headers={"Authorization": "Bearer valid-session"},
+                json={"job_id": "00000000-0000-0000-0000-000000000001", "consent": False},
+            )
+            invalid_job = self.client.post(
+                "/api/application-materials",
+                headers={"Authorization": "Bearer valid-session"},
+                json={"job_id": "not-a-uuid", "consent": True},
+            )
+
+        self.assertEqual(no_consent.status_code, 400)
+        self.assertIn("Confirm", no_consent.json["error"])
+        self.assertEqual(invalid_job.status_code, 400)
+        self.assertIn("valid identifier", invalid_job.json["error"])
+
+    def test_retired_feature_routes_are_not_exposed(self):
+        for path in ("/api/analyze-resume", "/api/community/posts"):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 404, path)
+
+    def test_community_removal_migration_is_review_only_and_rerunnable(self):
+        repository_root = Path(__file__).parents[1]
+        migration = (
+            repository_root
+            / "backend"
+            / "migrations"
+            / "phase17_remove_community.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("drop table if exists public.community_posts cascade", migration.lower())
+        self.assertIn("drop policy if exists", migration.lower())
+        self.assertIn("notify pgrst, 'reload schema'", migration.lower())
+        self.assertIn("run manually in supabase after review", migration.lower())
+        self.assertNotIn("service_role", migration.lower())
+
     def test_ai_assist_requires_configuration_and_explicit_consent(self):
         payload = {
             "task": "resume_feedback",
@@ -1231,7 +1155,7 @@ class CareerLensApiTests(unittest.TestCase):
             short_text = self.post_ai_assist({**valid, "text": "Too short"})
             short_coaching_question = self.post_ai_assist({
                 **valid,
-                "task": "career_coach",
+                "task": "ask_question",
                 "text": "?",
             })
             long_text = self.post_ai_assist({**valid, "text": "x" * 8001})
@@ -1321,7 +1245,7 @@ class CareerLensApiTests(unittest.TestCase):
         )
         verify_provider.assert_called_once()
 
-    def test_ai_assist_accepts_a_short_consented_career_coaching_question(self):
+    def test_ai_assist_accepts_a_short_consented_question(self):
         provider_response = MagicMock()
         provider_response.__enter__.return_value = provider_response
         provider_response.read.return_value = (
@@ -1329,7 +1253,7 @@ class CareerLensApiTests(unittest.TestCase):
             b'[{"type":"text","text":"Start with one small step."}]}]}'
         )
         payload = {
-            "task": "career_coach",
+            "task": "ask_question",
             "role": "Career guidance",
             "text": "I feel stuck.",
             "consent": True,
@@ -1392,35 +1316,6 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertFalse(request_payload["store"])
         self.assertEqual(urlopen_mock.call_args_list[1].kwargs["timeout"], 30)
 
-    def test_ai_assist_accepts_linkedin_profile_optimization_task(self):
-        provider_response = MagicMock()
-        provider_response.__enter__.return_value = provider_response
-        provider_response.read.return_value = (
-            b'{"status":"completed","steps":[{"type":"model_output","content":'
-            b'[{"type":"text","text":"Suggested headline: Product Designer."}]}]}'
-        )
-        payload = {
-            "task": "linkedin_profile",
-            "role": "Product Designer",
-            "text": "Current role: Product Designer. Skills: prototyping and user research.",
-            "consent": True,
-        }
-        with (
-            patch.object(app_module, "GEMINI_API_KEY", "server-only-test-key"),
-            patch.object(
-                app_module,
-                "urlopen",
-                side_effect=[self.auth_urlopen.return_value, provider_response],
-            ) as urlopen_mock,
-        ):
-            response = self.post_ai_assist(payload)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json["answer"], "Suggested headline: Product Designer.")
-        prompt = json.loads(urlopen_mock.call_args_list[1].args[0].data)["input"]
-        self.assertIn("Do not invent experience, skills, credentials, or results", prompt)
-        self.assertIn(payload["text"], prompt)
-
     def test_ai_assist_retries_transient_provider_unavailability(self):
         transient_error = HTTPError(
             "https://generativelanguage.googleapis.com/",
@@ -1436,7 +1331,7 @@ class CareerLensApiTests(unittest.TestCase):
             b'[{"type":"text","text":"Try this revised summary."}]}]}'
         )
         payload = {
-            "task": "linkedin_profile",
+            "task": "resume_feedback",
             "role": "Product Designer",
             "text": "Current role: Product Designer. Skills: prototyping and user research.",
             "consent": True,

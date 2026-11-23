@@ -96,29 +96,26 @@
             <a href="#dashboard" class="brand" aria-label="CareerLens"><span class="brand-wordmark">Career<span>Lens</span><b>.</b></span></a>
             <p class="nav-label">YOUR WORKSPACE</p>
             <nav class="side-nav" aria-label="Workspace navigation">
-                <a class="nav-link" href="#community" data-account-type="job_seeker job_provider"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-users"></use></svg></span><span>Community</span></a>
                 <p class="nav-label" data-nav-account-type="job_seeker">OVERVIEW</p>
                 <a class="nav-link active" href="#dashboard" data-account-type="job_seeker" aria-current="page"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-dashboard"></use></svg></span><span>Dashboard</span></a>
+                <a class="nav-link" href="#notifications" data-account-types="job_seeker job_provider"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-bell"></use></svg></span><span>Notifications</span><span id="notification-count" class="notification-count" hidden>0</span></a>
                 <p class="nav-label" data-nav-account-type="job_seeker">JOBS &amp; APPLICATIONS</p>
                 <a class="nav-link" href="#browse-jobs" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-search"></use></svg></span><span>Find jobs</span></a>
                 <a class="nav-link" href="#applications" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-clock"></use></svg></span><span>My applications</span></a>
+                <a class="nav-link" href="#application-materials" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-file"></use></svg></span><span>Resume &amp; Cover Letter</span></a>
                 <p class="nav-label" data-nav-account-type="job_seeker">CAREER TOOLS</p>
-                <a class="nav-link" href="#ats-workspace" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-file"></use></svg></span><span>Resume ATS</span></a>
                 <a class="nav-link" href="#interview-prep-workspace" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-briefcase"></use></svg></span><span>Interview Prep</span></a>
-                <a class="nav-link" href="#linkedin-workspace" data-account-type="job_seeker"><span class="nav-icon nav-icon-text" aria-hidden="true">in</span><span>LinkedIn Optimizer</span></a>
-                <a class="nav-link" href="#assistant-workspace" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-sparkles"></use></svg></span><span>Career Coach</span></a>
+                <a class="nav-link" href="#ai-assist-workspace" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-sparkles"></use></svg></span><span>AI Assistant</span></a>
                 <a class="nav-link" href="#skills-workspace" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-target"></use></svg></span><span>Skill Gap Analysis</span></a>
                 <a class="nav-link" href="#learning-workspace" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-book"></use></svg></span><span>Learning</span></a>
-                <p class="nav-label" data-nav-account-type="job_seeker">AI TOOLS</p>
-                <a class="nav-link" href="#ai-assist-workspace" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-sparkles"></use></svg></span><span>Career AI Studio</span></a>
                 <p class="nav-label" data-nav-account-type="job_provider">HIRING OVERVIEW</p>
                 <a class="nav-link" href="#provider-dashboard" data-account-type="job_provider"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-dashboard"></use></svg></span><span>Overview</span></a>
                 <p class="nav-label" data-nav-account-type="job_provider">HIRING</p>
                 <a class="nav-link" href="#provider-jobs" data-account-type="job_provider"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-briefcase"></use></svg></span><span>Job listings</span></a>
                 <a class="nav-link" href="#provider-applicants" data-account-type="job_provider"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-users"></use></svg></span><span>Applicants</span></a>
                 <a class="nav-link" href="#employer-profile" data-account-type="job_provider"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-users"></use></svg></span><span>Employer profile</span></a>
-                <p class="nav-label" data-nav-account-type="job_provider">AI TOOLS</p>
-                <a class="nav-link" href="#ai-assist-workspace" data-account-type="job_provider"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-sparkles"></use></svg></span><span>Career AI Studio</span></a>
+                <p class="nav-label" data-nav-account-type="job_provider">TOOLS</p>
+                <a class="nav-link" href="#ai-assist-workspace" data-account-type="job_provider"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-sparkles"></use></svg></span><span>AI Assistant</span></a>
             </nav>
             <a class="sidebar-bottom profile-link" id="sidebar-profile-link" href="#my-profile" aria-label="Open profile" hidden>
                 <div class="profile-avatar" id="profile-avatar">CL</div>
@@ -140,67 +137,6 @@
 
             <p id="app-message" class="form-message app-message" role="status" aria-live="polite"></p>
 
-            <section class="page-view community-view" id="community" data-page-view data-page-title="Community" data-account-type="job_seeker job_provider">
-                <div class="community-hero">
-                    <div>
-                        <p class="eyebrow">CAREER COMMUNITY</p>
-                        <h1>Learn, share, and grow together.</h1>
-                        <p class="subtitle">Ask thoughtful questions, share an experience, and connect with people navigating the same career journey.</p>
-                    </div>
-                    <button class="primary-button" id="community-composer-toggle" type="button">+ Create a post</button>
-                </div>
-
-                <form class="community-composer" id="community-composer" hidden>
-                    <div class="community-composer-heading">
-                        <div><p class="eyebrow">START A CONVERSATION</p><h2>Share with the community</h2></div>
-                        <button class="secondary-button" id="community-composer-close" type="button">Cancel</button>
-                    </div>
-                    <label for="community-post-title">Title</label>
-                    <input id="community-post-title" maxlength="160" minlength="5" required placeholder="What would you like to discuss?">
-                    <label for="community-post-category">Category</label>
-                    <select id="community-post-category" required>
-                        <option value="">Choose a category</option>
-                        <option>Career advice</option>
-                        <option>Interview tips</option>
-                        <option>Job search</option>
-                        <option>Skill building</option>
-                        <option>Hiring</option>
-                        <option>Success stories</option>
-                    </select>
-                    <label for="community-post-body">Details</label>
-                    <textarea id="community-post-body" rows="6" maxlength="5000" minlength="10" required placeholder="Share enough context for others to give useful, respectful advice."></textarea>
-                    <div class="community-composer-footer">
-                        <span>Keep personal information private.</span>
-                        <button class="primary-button" id="community-post-submit" type="submit">Publish post</button>
-                    </div>
-                </form>
-
-                <div class="community-controls">
-                    <label class="sr-only" for="community-search">Search Community posts</label>
-                    <input id="community-search" type="search" placeholder="Search posts, topics, or experiences">
-                    <label class="sr-only" for="community-category-filter">Filter by category</label>
-                    <select id="community-category-filter">
-                        <option value="all">All categories</option>
-                        <option>Career advice</option>
-                        <option>Interview tips</option>
-                        <option>Job search</option>
-                        <option>Skill building</option>
-                        <option>Hiring</option>
-                        <option>Success stories</option>
-                    </select>
-                    <label class="sr-only" for="community-feed-filter">Filter feed</label>
-                    <select id="community-feed-filter">
-                        <option value="latest">Latest</option>
-                        <option value="saved">Saved posts</option>
-                        <option value="mine">My posts</option>
-                        <option value="discussed">Most discussed</option>
-                    </select>
-                </div>
-                <p id="community-message" class="form-message" role="status" aria-live="polite"></p>
-                <div id="community-feed" class="community-feed" aria-live="polite"></div>
-                <p id="community-empty" class="community-empty" hidden>No posts match this view yet.</p>
-            </section>
-
             <section class="page-view dashboard-view" id="dashboard" data-page-view data-page-title="Dashboard" data-account-type="job_seeker">
             <section class="welcome-section">
                 <div>
@@ -208,16 +144,9 @@
                     <h1>Build your next chapter.</h1>
                     <p class="subtitle">Your skills, opportunities, and career growth — all in one place.</p>
                 </div>
-                <a class="primary-button" href="#ats-workspace"><svg class="icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg>Analyze my resume</a>
             </section>
 
             <section class="stats-grid" aria-label="Career overview">
-                <article class="stat-card">
-                    <div class="stat-icon violet"><svg class="icon" aria-hidden="true"><use href="#icon-file"></use></svg></div>
-                    <p>Resume Match</p>
-                    <h2 id="ats-stat">--<small> / 100</small></h2>
-                    <span class="stat-note">Analyze your resume against a role</span>
-                </article>
                 <article class="stat-card">
                     <div class="stat-icon green"><svg class="icon" aria-hidden="true"><use href="#icon-briefcase"></use></svg></div>
                     <p>Applications</p>
@@ -288,22 +217,10 @@
                         <a href="#browse-jobs" class="tool-link">Explore jobs <svg class="icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg></a>
                     </article>
                     <article class="tool-card">
-                        <div class="tool-top"><div class="tool-icon violet"><svg class="icon" aria-hidden="true"><use href="#icon-file"></use></svg></div><span class="tool-tag">RESUME</span></div>
-                        <h3>ATS Resume Analyzer</h3>
-                        <p>Compare your resume with a job description and get a keyword match with practical improvement tips.</p>
-                        <a href="#ats-workspace" class="tool-link">Analyze resume <svg class="icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg></a>
-                    </article>
-                    <article class="tool-card">
-                        <div class="tool-top"><div class="tool-icon blue">in</div><span class="tool-tag">PROFILE</span></div>
-                        <h3>LinkedIn Profile Builder</h3>
-                        <p>View and update your target role, headline, About section, and saved skills.</p>
-                        <a href="#linkedin-workspace" class="tool-link">Edit profile <svg class="icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg></a>
-                    </article>
-                    <article class="tool-card">
                         <div class="tool-top"><div class="tool-icon green"><svg class="icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg></div><span class="tool-tag">CAREER COACH</span></div>
-                        <h3>Career Coach</h3>
-                        <p>Explore practical, guided prompts for interviews, career planning, and your next steps.</p>
-                        <a href="#assistant-workspace" class="tool-link">Get guidance <svg class="icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg></a>
+                        <h3>AI Assistant</h3>
+                        <p>Get opt-in résumé feedback, interview-answer coaching, and practical career guidance.</p>
+                        <a href="#ai-assist-workspace" class="tool-link">Open AI Assistant <svg class="icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg></a>
                     </article>
                     <article class="tool-card">
                         <div class="tool-top"><div class="tool-icon orange"><svg class="icon" aria-hidden="true"><use href="#icon-target"></use></svg></div><span class="tool-tag">DEVELOPMENT</span></div>
@@ -319,7 +236,7 @@
                     </article>
                     <article class="tool-card">
                         <div class="tool-top"><div class="tool-icon violet"><svg class="icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg></div><span class="tool-tag">GEMINI AI</span></div>
-                        <h3>Career AI Studio</h3>
+                        <h3>AI Assistant</h3>
                         <p>Get opt-in resume and interview coaching, or help creating clearer job descriptions and consistent interview kits.</p>
                         <a href="#ai-assist-workspace" class="tool-link">Explore AI tools <svg class="icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg></a>
                     </article>
@@ -373,6 +290,12 @@
                 </section>
             </section>
 
+            <section class="page-view section-block" id="notifications" data-page-view data-page-title="Notifications" data-account-types="job_seeker job_provider">
+                <div class="section-heading"><div><p class="eyebrow">STAY IN THE LOOP</p><h2>Notifications.</h2><p class="subtitle">Status changes, interview dates, and follow-up reminders in one place.</p></div></div>
+                <p id="notifications-message" class="form-message" role="status" aria-live="polite"></p>
+                <div id="notification-list" class="notification-list" aria-live="polite"></div>
+            </section>
+
             <section class="page-view section-block" id="provider-jobs" data-page-view data-page-title="Job listings" data-account-type="job_provider">
                 <div class="section-heading"><div><p class="eyebrow">YOUR OPPORTUNITIES</p><h2>Manage job listings.</h2><p class="subtitle">Draft, publish, and close roles from one place.</p></div><button class="primary-button" type="button" data-open-job-form>+ Post a job</button></div>
                 <p id="provider-jobs-message" class="form-message" role="status" aria-live="polite"></p>
@@ -380,7 +303,7 @@
             </section>
 
             <section class="page-view section-block" id="provider-applicants" data-page-view data-page-title="Applicants" data-account-type="job_provider">
-                <div class="section-heading"><div><p class="eyebrow">CANDIDATE PIPELINE</p><h2>Review applicants.</h2><p class="subtitle">Review résumés, schedule interviews, move candidates through each stage, and keep private hiring notes for your listings.</p></div></div>
+                <div class="section-heading"><div><p class="eyebrow">CANDIDATE PIPELINE</p><h2>Review applicants.</h2><p class="subtitle">Applicants are ranked by the same evidence breakdown used for job seekers, alongside résumé review, interviews, and private hiring notes.</p></div></div>
                 <div class="application-stage-guide" id="application-stage-guide" aria-label="Hiring stages">
                     <span>Submitted</span><span aria-hidden="true">→</span><span>CV review</span><span aria-hidden="true">→</span><span>Shortlisted</span><span aria-hidden="true">→</span><span>Interview</span><span aria-hidden="true">→</span><span>Offer</span><span aria-hidden="true">→</span><span>Hired or rejected</span>
                 </div>
@@ -439,33 +362,6 @@
                 </div>
             </section>
 
-            <section class="page-view section-block workspace-section" id="ats-workspace" data-page-view data-page-title="Resume ATS" data-account-type="job_seeker">
-                <div class="section-heading">
-                    <div>
-                        <p class="eyebrow">RESUME INTELLIGENCE</p>
-                        <h2>Analyze your resume.</h2>
-                        <p class="subtitle">Your PDF is processed for this analysis and is not saved to your account.</p>
-                    </div>
-                </div>
-                <form id="ats-form" class="ats-form" enctype="multipart/form-data">
-                    <label for="resume-file">Resume (PDF, max 5 MB)</label>
-                    <input id="resume-file" name="resume" type="file" accept=".pdf,application/pdf" required>
-                    <label for="job-description">Target job description</label>
-                    <textarea id="job-description" name="job_description" rows="7" placeholder="Paste the complete job description here..." required></textarea>
-                    <button type="submit" class="primary-button" id="analyze-button">Analyze resume</button>
-                </form>
-                <p id="ats-message" class="form-message" role="status" aria-live="polite"></p>
-                <div id="ats-results" class="results-panel" hidden>
-                    <div class="ats-score-card"><p>Keyword Match</p><div class="ats-score"><span id="ats-score">0</span><span>%</span></div></div>
-                    <div class="ats-keyword-grid">
-                        <div><h3>Matched keywords</h3><ul id="matched-keywords"></ul></div>
-                        <div><h3>Missing keywords</h3><ul id="missing-keywords"></ul></div>
-                    </div>
-                    <div><h3>Improvement suggestions</h3><ul id="ats-suggestions"></ul></div>
-                    <p id="ats-note" class="ats-note"></p>
-                </div>
-            </section>
-
             <section class="page-view section-block workspace-section" id="interview-prep-workspace" data-page-view data-page-title="Interview Prep" data-account-type="job_seeker">
                 <div class="section-heading">
                     <div>
@@ -498,7 +394,7 @@
                         <div>
                             <p class="eyebrow">YOUR PRACTICE PACK</p>
                             <h3 id="interview-pack-title"></h3>
-                            <p id="interview-pack-note" class="ats-note"></p>
+                            <p id="interview-pack-note" class="tool-note"></p>
                         </div>
                         <button class="secondary-button" id="download-interview-pack" type="button">Download practice sheet</button>
                     </div>
@@ -518,26 +414,74 @@
                 </div>
             </section>
 
-            <section class="page-view section-block workspace-section" id="ai-assist-workspace" data-page-view data-page-title="Career AI Studio" data-account-types="job_seeker job_provider">
+            <section class="page-view section-block workspace-section" id="application-materials" data-page-view data-page-title="Resume & Cover Letter" data-account-type="job_seeker">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">JOB-SPECIFIC APPLICATIONS</p>
+                        <h2>Tailor your résumé and cover letter.</h2>
+                        <p class="subtitle">Choose a published role. CareerLens uses your saved profile and portfolio projects to draft focused bullets and a cover letter without inventing experience.</p>
+                    </div>
+                </div>
+                <form id="application-materials-form" class="tool-form">
+                    <label for="application-material-job">Published job</label>
+                    <select id="application-material-job" required>
+                        <option value="">Choose a listing</option>
+                    </select>
+                    <label class="ai-consent">
+                        <input id="application-material-consent" type="checkbox" required>
+                        <span>I agree to send the selected job, my saved profile, and portfolio project details to Google Gemini for this request. My phone and location are not sent unless included in profile text. CareerLens saves the generated draft for this job.</span>
+                    </label>
+                    <div class="interview-form-footer">
+                        <span class="muted-text">Review every draft. Only keep claims supported by your real experience.</span>
+                        <button class="primary-button" type="submit" id="application-material-submit">Generate materials</button>
+                    </div>
+                </form>
+                <p id="application-material-message" class="form-message" role="status" aria-live="polite"></p>
+                <section id="application-material-result" class="application-material-result" aria-live="polite" hidden>
+                    <div class="application-material-heading">
+                        <div>
+                            <p class="eyebrow">DRAFT FOR THIS JOB</p>
+                            <h3 id="application-material-job-title"></h3>
+                        </div>
+                        <button id="application-material-copy" class="secondary-button" type="button">Copy both drafts</button>
+                    </div>
+                    <section>
+                        <h3>Résumé bullets</h3>
+                        <ul id="application-material-bullets" class="application-material-bullets"></ul>
+                    </section>
+                    <section>
+                        <h3>Cover letter</h3>
+                        <pre id="application-material-cover-letter" class="application-material-cover-letter"></pre>
+                    </section>
+                </section>
+            </section>
+
+            <section class="page-view section-block workspace-section" id="ai-assist-workspace" data-page-view data-page-title="AI Assistant" data-account-types="job_seeker job_provider">
                 <div class="section-heading">
                     <div>
                         <p class="eyebrow">OPTIONAL GEMINI ASSISTANCE</p>
-                        <h2>Career AI Studio.</h2>
-                        <p class="subtitle">For job seekers and employers: get focused suggestions while keeping people, not AI, in control.</p>
+                        <h2>AI Assistant.</h2>
+                        <p class="subtitle">Choose a focused assistant and review every suggestion while keeping people, not AI, in control.</p>
                     </div>
                 </div>
+                <div class="ai-assistant-tabs" role="tablist" aria-label="AI Assistant tools" data-account-type="job_seeker">
+                    <button class="ai-assistant-tab is-active" type="button" role="tab" aria-selected="true" data-ai-task="resume_feedback">Résumé Feedback</button>
+                    <button class="ai-assistant-tab" type="button" role="tab" aria-selected="false" data-ai-task="interview_answer">Interview Answers</button>
+                    <button class="ai-assistant-tab" type="button" role="tab" aria-selected="false" data-ai-task="ask_question">Ask a Question</button>
+                </div>
                 <form id="ai-assist-form" class="tool-form ai-assist-form">
-                    <label for="ai-task">Choose a tool</label>
-                    <select id="ai-task" name="task" required>
+                    <label for="ai-task" id="ai-task-label">Employer tool</label>
+                    <select id="ai-task" name="task" class="ai-task-select" required>
                         <option value="resume_feedback" data-account-type="job_seeker">Job seeker: review resume text</option>
                         <option value="interview_answer" data-account-type="job_seeker">Job seeker: coach an interview answer</option>
+                        <option value="ask_question" data-account-type="job_seeker">Job seeker: ask a career question</option>
                         <option value="improve_job_description" data-account-type="job_provider">Employer: improve a job description</option>
                         <option value="interview_kit" data-account-type="job_provider">Employer: create an interview kit</option>
                     </select>
                     <label for="ai-role">Target role</label>
                     <input id="ai-role" name="role" maxlength="120" required placeholder="e.g. Junior Backend Developer">
                     <label for="ai-text">Text for this request</label>
-                    <textarea id="ai-text" name="text" rows="8" minlength="40" maxlength="8000" required placeholder="Paste only the resume excerpt, interview answer, or job description you want help with."></textarea>
+                    <textarea id="ai-text" name="text" rows="8" minlength="2" maxlength="8000" required placeholder="Paste the résumé excerpt, interview answer, or question you want help with."></textarea>
                     <label class="ai-consent">
                         <input id="ai-consent" name="consent" type="checkbox" required>
                         <span>I agree to send the selected tool, target role, and text above to Google Gemini for this request. CareerLens does not store this AI request; Google's data-handling terms apply. Do not include passwords, contact details, or other sensitive personal information.</span>
@@ -548,8 +492,8 @@
                     </div>
                 </form>
                 <p id="ai-assist-message" class="form-message" role="status" aria-live="polite"></p>
-                <section id="ai-assist-result" class="coach-answer ai-assist-result" aria-live="polite" hidden>
-                    <h3>Gemini suggestions</h3>
+                <section id="ai-assist-result" class="ai-assist-result" aria-live="polite" hidden>
+                    <h3>AI Assistant response</h3>
                     <div id="ai-assist-answer"></div>
                 </section>
             </section>
@@ -559,7 +503,7 @@
                     <div>
                         <p class="eyebrow">YOUR CAREER PROFILE</p>
                         <h2>Tell your career story.</h2>
-                        <p class="subtitle">Keep your details, skills, education, and projects together. Your career details are private to your account; your name appears on your Community posts.</p>
+                        <p class="subtitle">Keep your details, skills, education, and projects together. Your career details are private to your account.</p>
                     </div>
                 </div>
                 <form id="my-profile-form" class="tool-form">
@@ -636,46 +580,6 @@
                     <button class="primary-button" type="submit">Save employer profile</button>
                     <p id="employer-profile-message" class="form-message" role="status" aria-live="polite"></p>
                 </form>
-            </section>
-
-            <section class="page-view section-block workspace-section" id="linkedin-workspace" data-page-view data-page-title="LinkedIn Optimizer" data-account-type="job_seeker">
-                <div class="section-heading"><div><p class="eyebrow">PROFESSIONAL BRAND</p><h2>Optimize your LinkedIn profile.</h2><p class="subtitle">Save LinkedIn-specific drafts here; they stay separate from your CareerLens profile. Copy them to LinkedIn when you’re ready. Edit your career details in <a href="#my-profile">My Profile</a>.</p></div></div>
-                <form id="profile-form" class="tool-form">
-                    <label for="linkedin-target-role">LinkedIn target role</label>
-                    <input id="linkedin-target-role" maxlength="120" placeholder="e.g. Product Designer">
-                    <label for="linkedin-headline-draft">Headline draft</label>
-                    <input id="linkedin-headline-draft" maxlength="220" placeholder="Your role, strengths, and value">
-                    <label for="linkedin-about-draft">About draft</label>
-                    <textarea id="linkedin-about-draft" rows="6" maxlength="2600" placeholder="Summarize your experience, strengths, and the work you want to do."></textarea>
-                    <p class="muted-text">Skills and career details are managed in <a href="#my-profile">My Profile</a>.</p>
-                    <button class="primary-button" type="submit">Save LinkedIn draft</button>
-                    <p id="profile-message" class="form-message" role="status" aria-live="polite"></p>
-                </form>
-                <div class="tip-panel"><strong>Profile checklist</strong><ul><li>Use a clear target role and relevant keywords.</li><li>Describe measurable impact where possible.</li><li>Only include experience and skills you can support with examples.</li></ul></div>
-                <section class="linkedin-ai-panel" aria-labelledby="linkedin-ai-title">
-                    <div class="section-heading">
-                        <div>
-                            <p class="eyebrow">OPTIONAL AI REVIEW</p>
-                            <h3 id="linkedin-ai-title">Get LinkedIn suggestions</h3>
-                            <p class="subtitle">Gemini can suggest edits using your career summary, roles, skills, education, and saved LinkedIn drafts. Suggestions are not saved automatically.</p>
-                        </div>
-                    </div>
-                    <form id="linkedin-ai-form" class="tool-form">
-                        <label class="ai-consent">
-                            <input id="linkedin-ai-consent" type="checkbox" required>
-                            <span>I agree to send my roles, headline and About text, skills, education, and LinkedIn drafts to Google Gemini for this request. My name, email, phone, and location are not added automatically; remove any such details from my About text before sending. Google's data-handling terms apply.</span>
-                        </label>
-                        <div class="interview-form-footer">
-                            <span class="muted-text">Review your text before sending. AI suggestions may be inaccurate and do not guarantee hiring outcomes.</span>
-                            <button class="primary-button" id="linkedin-ai-submit" type="submit">Get AI suggestions</button>
-                        </div>
-                    </form>
-                    <p id="linkedin-ai-message" class="form-message" role="status" aria-live="polite"></p>
-                    <section id="linkedin-ai-result" class="coach-answer ai-assist-result" aria-live="polite" hidden>
-                        <h4>LinkedIn suggestions</h4>
-                        <div id="linkedin-ai-answer"></div>
-                    </section>
-                </section>
             </section>
 
             <section class="page-view section-block workspace-section learning-workspace" id="learning-workspace" data-page-view data-page-title="Learning" data-account-type="job_seeker">
@@ -792,7 +696,7 @@
                 <section id="skill-results" class="results-panel skill-gap-results" aria-live="polite" hidden>
                     <div class="skill-gap-heading">
                         <div><p class="eyebrow">EVIDENCE-BASED COMPARISON</p><h3 id="skill-result-title">Skills for this role</h3></div>
-                        <p id="skill-gap-note" class="ats-note"></p>
+                        <p id="skill-gap-note" class="tool-note"></p>
                     </div>
                     <div class="skill-gap-summary" aria-label="Skill analysis summary">
                         <article><span>Recognized job skills</span><strong id="skill-total-count">0</strong></article>
@@ -816,39 +720,6 @@
                         <p id="skill-learning-empty" class="learning-empty-state">No matching catalogue resources are available for this analysis yet.</p>
                     </section>
                     <p class="skill-gap-disclaimer">“Demonstrated” means relevant context was found in the text you provided; it does not independently verify proficiency. Add or correct your evidence above and analyze again.</p>
-                </section>
-            </section>
-
-            <section class="page-view section-block workspace-section" id="assistant-workspace" data-page-view data-page-title="Career Coach" data-account-type="job_seeker">
-                <div class="section-heading"><div><p class="eyebrow">CAREER GUIDANCE</p><h2>Your career coach.</h2><p class="subtitle">Ask about your next move, a tricky work moment, or anything else on your mind. Get thoughtful, practical guidance shaped around your question.</p></div></div>
-                <div class="coach-intro"><span class="coach-intro-icon"><svg class="icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg></span><p><strong>A space to think things through.</strong> Share only the context you’re comfortable sharing. Your question is sent to Google Gemini only when you agree below, and CareerLens does not store the request.</p></div>
-                <div class="coach-prompts" aria-label="Choose a coaching topic">
-                    <button type="button" class="secondary-button coach-prompt" data-prompt="I have an interview coming up. How can I prepare and feel more confident?">Interview confidence</button>
-                    <button type="button" class="secondary-button coach-prompt" data-prompt="I’m unsure what my next career move should be. Help me think it through.">Choosing a direction</button>
-                    <button type="button" class="secondary-button coach-prompt" data-prompt="How can I make my resume stronger for the roles I want?">Resume feedback</button>
-                    <button type="button" class="secondary-button coach-prompt" data-prompt="I want to learn a new skill for work. How should I get started?">Learning a skill</button>
-                </div>
-                <form id="coach-form" class="coach-form">
-                    <label class="sr-only" for="coach-question">What would you like help with?</label>
-                    <textarea id="coach-question" name="question" maxlength="400" rows="3" placeholder="What’s on your mind? Add any context that might help..." required></textarea>
-                    <label class="coach-consent">
-                        <input id="coach-consent" type="checkbox" required>
-                        <span>I agree to send this question to Google Gemini for this reply. Google’s data-handling terms apply. I understand AI guidance can be inaccurate and should be considered thoughtfully. I won’t include passwords or sensitive personal information.</span>
-                    </label>
-                    <div class="coach-submit-row">
-                        <span class="coach-privacy-note">Your question is sent only after you check this box and submit. It is not stored by CareerLens.</span>
-                        <button class="primary-button" type="submit" id="coach-submit"><svg class="icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg>Get thoughtful guidance</button>
-                    </div>
-                </form>
-                <p id="coach-message" class="form-message" role="status" aria-live="polite"></p>
-                <section id="coach-answer" class="coach-answer" aria-live="polite" hidden>
-                    <div class="coach-answer-heading">
-                        <span class="coach-answer-icon"><svg class="icon" aria-hidden="true"><use href="#icon-sparkles"></use></svg></span>
-                        <div><p class="eyebrow">A THOUGHTFUL NEXT STEP</p><h3>Your guidance</h3></div>
-                        <button class="secondary-button coach-copy" id="coach-copy" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-file"></use></svg>Copy</button>
-                    </div>
-                    <div id="coach-answer-content" class="coach-answer-content"></div>
-                    <p class="coach-disclaimer">Use what feels useful; you know your circumstances best. AI suggestions may be incomplete or inaccurate.</p>
                 </section>
             </section>
 
@@ -906,7 +777,7 @@
     <dialog class="application-dialog" id="job-application-dialog">
         <form id="job-application-form" class="tool-form">
             <div class="modal-heading"><div><p class="eyebrow">JOB APPLICATION</p><h2 id="job-application-title">Apply for this role</h2></div><button type="button" class="close-modal" id="close-job-application" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg></button></div>
-            <p class="application-sharing-note">Your name, email, introduction, and résumé PDF will be shared with this job's provider for hiring review. Your résumé is stored privately and is visible only to you and the provider for this job.</p>
+            <p class="application-sharing-note">Your name, email, introduction, résumé PDF, and saved profile or portfolio evidence will be shared with this job's provider for hiring review. Your résumé is stored privately and is visible only to you and the provider for this job.</p>
             <label for="candidate-name">Your name</label>
             <input id="candidate-name" name="applicant_name" maxlength="80" required>
             <label for="candidate-email">Email address</label>
@@ -917,7 +788,7 @@
             <textarea id="candidate-note" name="cover_note" rows="6" maxlength="4000" placeholder="Share a brief introduction or relevant experience..."></textarea>
             <label class="ai-consent">
                 <input id="candidate-consent" name="sharing_consent" type="checkbox" required>
-                <span>I agree to share these application details and my résumé with this job's provider for recruitment.</span>
+                <span>I agree to share these application details, my résumé, and my saved profile or portfolio evidence with this job's provider for recruitment.</span>
             </label>
             <button type="submit" class="primary-button" id="job-application-submit">Submit application</button>
             <p id="job-application-message" class="form-message" role="status" aria-live="polite"></p>
