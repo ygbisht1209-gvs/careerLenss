@@ -59,6 +59,7 @@ let currentApplicantMatches = new Map();
 let currentNotifications = [];
 let seekerApplications = [];
 let currentResumeVersions = [];
+let resumeVersionInsights = [];
 let applicationAnalytics = null;
 let applicationAnalyticsLoading = false;
 let applicationAnalyticsError = "";
@@ -294,6 +295,11 @@ function clearWorkspaceData() {
     if (notificationCount) notificationCount.hidden = true;
     seekerApplications = [];
     currentResumeVersions = [];
+    resumeVersionInsights = [];
+    document.getElementById("resume-version-list").replaceChildren();
+    setMessage(document.getElementById("resume-manager-message"), "");
+    document.getElementById("resume-limit-note").hidden = true;
+    document.getElementById("resume-manager-form").reset();
     currentStarStories = [];
     starStoriesAvailable = false;
     editingStarStoryId = null;
@@ -439,6 +445,7 @@ async function openWorkspace(user) {
                 loadPortfolioProjects(),
                 loadStarStories(),
                 loadNotifications(),
+                loadResumeManagement(),
             ]);
         }
     } catch (error) {
@@ -2518,22 +2525,229 @@ function openJobDialog(job = null) {
 }
 
 async function loadResumeVersions() {
-    const { data, error } = await supabaseClient
-        .from("resume_versions")
-        .select("id,label,storage_path,created_at")
-        .order("created_at", { ascending: false })
-        .limit(100);
-    if (error) throw error;
-    currentResumeVersions = Array.isArray(data) ? data : [];
+    const result = await careerApi("/api/resumes");
+    currentResumeVersions = Array.isArray(result.resumes) ? result.resumes : [];
+    return currentResumeVersions;
+}
+
+async function loadResumeManagement() {
+    const list = document.getElementById("resume-version-list");
+    list.replaceChildren(createEmptyState(
+        "Loading résumé versions",
+        "Your saved versions and descriptive application counts are loading."
+    ));
+    try {
+        await loadResumeVersions();
+        const result = await careerApi("/api/resumes/insights");
+        resumeVersionInsights = Array.isArray(result.insights) ? result.insights : [];
+        renderResumeManagement();
+        setMessage(document.getElementById("resume-manager-message"), "");
+        return true;
+    } catch (error) {
+        renderResumeManagement();
+        setMessage(
+            document.getElementById("resume-manager-message"),
+            error.message || "Could not load résumé versions.",
+            "error"
+        );
+        return false;
+    }
+}
+
+function renderResumeManagement() {
+    const list = document.getElementById("resume-version-list");
+    if (!list) return;
+    list.replaceChildren();
+
+    const uploadButton = document.getElementById("resume-manager-submit");
+    const atLimit = currentResumeVersions.length >= 10;
+    if (uploadButton) uploadButton.disabled = atLimit;
+    document.getElementById("resume-limit-note").hidden = !atLimit;
+    if (!currentResumeVersions.length) {
+        list.appendChild(createEmptyState(
+            "No saved résumé versions",
+            "Add a private PDF version here or save one while applying for a job."
+        ));
+        return;
+    }
+
+    currentResumeVersions.forEach((version, index) => {
+        const card = document.createElement("article");
+        card.className = "resume-version-card";
+        const insight = resumeVersionInsights.find(
+            (item) => item.resume_version_id === version.id
+        );
+        const labelId = `resume-version-label-${index}`;
+        const label = document.createElement("label");
+        label.htmlFor = labelId;
+        label.textContent = "Version label";
+        const labelInput = document.createElement("input");
+        labelInput.id = labelId;
+        labelInput.type = "text";
+        labelInput.maxLength = 100;
+        labelInput.value = version.label || "";
+
+        const metadata = document.createElement("p");
+        metadata.className = "resume-version-meta";
+        const sizeText = version.file_size !== null
+            && version.file_size !== undefined
+            && Number.isFinite(Number(version.file_size))
+            ? `${(Number(version.file_size) / (1024 * 1024)).toFixed(2)} MB`
+            : "File size unavailable";
+        metadata.textContent = `${sizeText} · Saved ${formatApplicationTimelineTimestamp(version.created_at)}`;
+
+        const metrics = document.createElement("dl");
+        metrics.className = "resume-version-metrics";
+        const metricValues = [
+            ["Applications sent", insight?.applications_sent ?? "--"],
+            ["Shortlisted or better", insight?.shortlisted_or_better ?? "--"],
+            [
+                "Shortlist rate",
+                insight?.sufficient_data
+                    && insight.shortlist_rate !== null
+                    && insight.shortlist_rate !== undefined
+                    && Number.isFinite(Number(insight.shortlist_rate))
+                    ? `${Number(insight.shortlist_rate).toFixed(1)}%`
+                    : "-- (fewer than 5 applications)"
+            ]
+        ];
+        metricValues.forEach(([term, value]) => {
+            const wrapper = document.createElement("div");
+            const heading = document.createElement("dt");
+            heading.textContent = term;
+            const detail = document.createElement("dd");
+            detail.textContent = String(value);
+            wrapper.append(heading, detail);
+            metrics.appendChild(wrapper);
+        });
+
+        const actions = document.createElement("div");
+        actions.className = "resume-version-actions";
+        const renameButton = document.createElement("button");
+        renameButton.className = "secondary-button";
+        renameButton.type = "button";
+        renameButton.textContent = "Save label";
+        renameButton.setAttribute(
+            "aria-label",
+            `Save label for ${version.label || "résumé version"}`
+        );
+        renameButton.addEventListener("click", async () => {
+            renameButton.disabled = true;
+            try {
+                await careerApi(`/api/resumes/${encodeURIComponent(version.id)}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ label: labelInput.value })
+                });
+                const refreshed = await loadResumeManagement();
+                setMessage(
+                    document.getElementById("resume-manager-message"),
+                    refreshed
+                        ? "Résumé label updated."
+                        : "Résumé label updated, but the list could not refresh. Reload the page.",
+                    refreshed ? "success" : "error"
+                );
+            } catch (error) {
+                setMessage(
+                    document.getElementById("resume-manager-message"),
+                    error.message || "Could not update the résumé label.",
+                    "error"
+                );
+            } finally {
+                renameButton.disabled = false;
+            }
+        });
+
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "secondary-button danger-button";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete version";
+        deleteButton.setAttribute(
+            "aria-label",
+            `Delete ${version.label || "résumé version"}`
+        );
+        deleteButton.addEventListener("click", async () => {
+            const count = Number(insight?.applications_sent || 0);
+            const detail = count
+                ? ` It is attached to ${count} application${count === 1 ? "" : "s"}; their submitted résumé files will remain available.`
+                : " If an application references its file, that submitted file will be retained.";
+            if (!window.confirm(`Delete “${version.label || "Résumé"}”?${detail}`)) return;
+            deleteButton.disabled = true;
+            try {
+                const result = await careerApi(
+                    `/api/resumes/${encodeURIComponent(version.id)}`,
+                    { method: "DELETE" }
+                );
+                const refreshed = await loadResumeManagement();
+                setMessage(
+                    document.getElementById("resume-manager-message"),
+                    refreshed
+                        ? result.file_retained
+                            ? "Résumé version removed. Its application file was retained."
+                            : "Résumé version and unused file removed."
+                        : "Résumé version removed, but the list could not refresh. Reload the page.",
+                    refreshed ? "success" : "error"
+                );
+            } catch (error) {
+                setMessage(
+                    document.getElementById("resume-manager-message"),
+                    error.message || "Could not delete the résumé version.",
+                    "error"
+                );
+            } finally {
+                deleteButton.disabled = false;
+            }
+        });
+        actions.append(renameButton, deleteButton);
+        card.append(label, labelInput, metadata, metrics, actions);
+        list.appendChild(card);
+    });
+}
+
+async function addManagedResumeVersion(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = document.getElementById("resume-manager-submit");
+    const formData = new FormData(form);
+    button.disabled = true;
+    try {
+        const result = await careerApi("/api/resumes", {
+            method: "POST",
+            body: formData
+        });
+        form.reset();
+        const refreshed = await loadResumeManagement();
+        setMessage(
+            document.getElementById("resume-manager-message"),
+            refreshed
+                ? "Résumé version saved privately."
+                : "Résumé version saved, but the list could not refresh. Reload the page.",
+            refreshed ? "success" : "error"
+        );
+        return result;
+    } catch (error) {
+        setMessage(
+            document.getElementById("resume-manager-message"),
+            error.message || "Could not save the résumé version.",
+            "error"
+        );
+    } finally {
+        button.disabled = currentResumeVersions.length >= 10;
+    }
 }
 
 function updateResumeVersionInputs() {
     const savedVersion = Boolean(document.getElementById("resume-version-select").value);
+    const atLimit = currentResumeVersions.length >= 10;
     const fileInput = document.getElementById("candidate-resume");
     const labelInput = document.getElementById("resume-version-label");
-    fileInput.required = !savedVersion;
-    fileInput.disabled = savedVersion;
-    labelInput.disabled = savedVersion;
+    fileInput.required = !savedVersion && !atLimit;
+    fileInput.disabled = savedVersion || atLimit;
+    labelInput.required = !savedVersion && !atLimit;
+    labelInput.disabled = savedVersion || atLimit;
+    const uploadOption = document.getElementById("resume-version-select").options[0];
+    uploadOption.textContent = atLimit
+        ? "10-version limit reached; choose a saved version"
+        : "Upload and save a new résumé version";
 }
 
 async function openJobApplication(job) {
@@ -2635,6 +2849,15 @@ async function submitJobApplication(event) {
         button.disabled = false;
         return;
     }
+    if (!selectedVersion && currentResumeVersions.length >= 10) {
+        setMessage(
+            document.getElementById("job-application-message"),
+            "You have reached the 10-version limit. Choose a saved résumé version or delete one before uploading another.",
+            "error"
+        );
+        button.disabled = false;
+        return;
+    }
     if (!selectedVersion && (!(resumeFile instanceof File) || !resumeFile.name)) {
         setMessage(document.getElementById("job-application-message"), "Choose a saved résumé version or upload a PDF before applying.", "error");
         button.disabled = false;
@@ -2676,35 +2899,17 @@ async function submitJobApplication(event) {
     let createdVersion = false;
     try {
         if (!selectedVersion) {
-            const signature = new TextDecoder().decode(await resumeFile.slice(0, 5).arrayBuffer());
-            if (signature !== "%PDF-") {
-                throw new Error("This file does not appear to be a valid PDF.");
-            }
-            resumeVersionId = crypto.randomUUID();
-            resumePath = `${currentUser.id}/versions/${resumeVersionId}.pdf`;
             setMessage(document.getElementById("job-application-message"), "Saving your résumé version privately...");
-            const upload = await supabaseClient.storage
-                .from("application-resumes")
-                .upload(resumePath, resumeFile, {
-                    cacheControl: "300",
-                    contentType: "application/pdf",
-                    upsert: false
-                });
-            if (upload.error) throw upload.error;
-            const version = await supabaseClient.from("resume_versions").insert({
-                id: resumeVersionId,
-                storage_path: resumePath,
-                label: String(values.get("resume_version_label") || "").trim()
+            const resumeForm = new FormData();
+            resumeForm.append("label", String(values.get("resume_version_label") || "").trim());
+            resumeForm.append("resume", resumeFile, resumeFile.name);
+            const result = await careerApi("/api/resumes", {
+                method: "POST",
+                body: resumeForm
             });
-            if (version.error) {
-                const cleanup = await supabaseClient.storage
-                    .from("application-resumes")
-                    .remove([resumePath]);
-                if (cleanup.error) {
-                    throw new Error("Résumé version metadata could not be saved, and the uploaded file could not be cleaned up. Contact support.");
-                }
-                throw version.error;
-            }
+            resumeVersionId = result.resume.id;
+            resumePath = result.resume.storage_path;
+            currentResumeVersions.unshift(result.resume);
             createdVersion = true;
         }
 
@@ -2724,8 +2929,13 @@ async function submitJobApplication(event) {
         }
         jobApplicationDialog.close();
         setMessage(document.getElementById("job-board-message"), "Application submitted. You can follow its status in My applications.", "success");
-        await Promise.all([loadSeekerApplications(), loadJobBoard()]);
+        await Promise.all([
+            loadSeekerApplications(),
+            loadJobBoard(),
+            loadResumeManagement()
+        ]);
     } catch (error) {
+        if (createdVersion) await loadResumeManagement();
         setMessage(document.getElementById("job-application-message"), supabaseErrorMessage(error), "error");
     } finally {
         button.disabled = false;
@@ -3978,7 +4188,9 @@ async function careerApi(path, options = {}) {
     if (!session) throw new Error("Your session has expired. Please sign in again.");
 
     const headers = { Authorization: `Bearer ${session.access_token}` };
-    if (options.body) headers["Content-Type"] = "application/json";
+    if (options.body && !(options.body instanceof FormData)) {
+        headers["Content-Type"] = "application/json";
+    }
     const response = await fetch(path, {
         ...options,
         headers: { ...headers, ...(options.headers || {}) }
@@ -4962,6 +5174,7 @@ providerRejectionDialog.addEventListener("close", () => {
 providerRejectionForm.addEventListener("submit", submitProviderRejection);
 document.getElementById("resume-version-select").addEventListener("change", updateResumeVersionInputs);
 jobApplicationForm.addEventListener("submit", submitJobApplication);
+document.getElementById("resume-manager-form").addEventListener("submit", addManagedResumeVersion);
 document.getElementById("job-search").addEventListener("input", renderJobBoard);
 document.getElementById("job-type-filter").addEventListener("change", renderJobBoard);
 document.getElementById("job-location-filter").addEventListener("input", renderJobBoard);

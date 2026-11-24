@@ -366,6 +366,30 @@
             </section>
 
             <section class="page-view section-block applications-section" id="applications" data-page-view data-page-title="My applications" data-account-type="job_seeker">
+                <section class="resume-version-management" aria-labelledby="resume-version-heading">
+                    <div class="section-heading">
+                        <div>
+                            <p class="eyebrow">RÉSUMÉ LIBRARY</p>
+                            <h2 id="resume-version-heading">Manage résumé versions.</h2>
+                            <p class="subtitle">Keep up to 10 private PDF versions. Application counts describe your recorded history; they do not predict hiring outcomes, and small samples are unreliable.</p>
+                        </div>
+                    </div>
+                    <form id="resume-manager-form" class="resume-manager-form">
+                        <div>
+                            <label for="resume-manager-label">Version label</label>
+                            <input id="resume-manager-label" name="label" maxlength="100" required placeholder="e.g. Backend v2">
+                        </div>
+                        <div>
+                            <label for="resume-manager-file">Résumé PDF (max 5 MB)</label>
+                            <input id="resume-manager-file" name="resume" type="file" accept=".pdf,application/pdf" required>
+                        </div>
+                        <button class="secondary-button" id="resume-manager-submit" type="submit">Add résumé version</button>
+                    </form>
+                    <p id="resume-manager-message" class="form-message" role="status" aria-live="polite"></p>
+                    <p id="resume-limit-note" class="resume-insights-note" hidden>You have reached the 10-version limit. Delete a version before adding another.</p>
+                    <p class="resume-insights-note">How this is calculated: applications are counted by the résumé version attached when submitted. “Shortlisted or better” includes Shortlisted, Interview, Offer, and Hired. Shortlist rates are shown only with at least 5 applications and are descriptive only; small samples are unreliable.</p>
+                    <div id="resume-version-list" class="resume-version-list" aria-live="polite"></div>
+                </section>
                 <section class="submitted-applications-section">
                     <div class="section-heading"><div><p class="eyebrow">APPLICATIONS THROUGH CAREERLENS</p><h2>Jobs you’ve applied for.</h2><p class="subtitle">Follow the status of applications you sent to providers here.</p></div></div>
                     <p id="my-job-applications-message" class="form-message" role="status" aria-live="polite"></p>
@@ -900,8 +924,8 @@
             <p class="muted-text">Only the version selected for this application is shared with its provider. Saved versions stay private to you unless selected for an application.</p>
             <label for="candidate-resume">New résumé version (PDF, max 5 MB)</label>
             <input id="candidate-resume" name="resume" type="file" accept=".pdf,application/pdf" required>
-            <label for="resume-version-label">Version label <span class="muted-text">(optional)</span></label>
-            <input id="resume-version-label" name="resume_version_label" maxlength="100" placeholder="e.g. Backend-focused résumé">
+            <label for="resume-version-label">Version label</label>
+            <input id="resume-version-label" name="resume_version_label" maxlength="100" required placeholder="e.g. Backend-focused résumé">
             <label for="candidate-note">Message to the provider <span class="muted-text">(optional)</span></label>
             <textarea id="candidate-note" name="cover_note" rows="6" maxlength="4000" placeholder="Share a brief introduction or relevant experience..."></textarea>
             <label class="ai-consent">

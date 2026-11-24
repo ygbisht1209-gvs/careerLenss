@@ -4729,6 +4729,87 @@ transition-duration: 0.18s;
     line-height: 1.7;
 }
 
+.resume-version-management {
+    display: grid;
+    gap: 16px;
+    margin-bottom: 32px;
+    padding: 22px;
+    border: 1px solid #dfe5e1;
+    border-radius: 16px;
+    background: #fff;
+}
+
+.resume-manager-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+    align-items: end;
+    gap: 12px;
+}
+
+.resume-manager-form > div,
+.resume-version-card {
+    display: grid;
+    gap: 8px;
+}
+
+.resume-version-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+    gap: 14px;
+}
+
+.resume-version-card {
+    align-content: start;
+    padding: 16px;
+    border: 1px solid #dfe5e1;
+    border-radius: 12px;
+    background: #fbfcfb;
+}
+
+.resume-version-meta,
+.resume-insights-note {
+    margin: 0;
+    color: #617067;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.resume-version-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin: 4px 0;
+}
+
+.resume-version-metrics > div {
+    padding: 10px;
+    border-radius: 8px;
+    background: #f0f4f1;
+}
+
+.resume-version-metrics dt {
+    color: #617067;
+    font-size: 11px;
+}
+
+.resume-version-metrics dd {
+    margin: 5px 0 0;
+    color: #23332a;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.resume-version-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.resume-version-actions .danger-button {
+    border-color: #b94a48;
+    color: #8d2928;
+}
+
 .job-form-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4743,6 +4824,11 @@ transition-duration: 0.18s;
 @media (max-width: 700px) {
     .job-board-list,
     .provider-overview-panel .provider-applicant-list {
+        grid-template-columns: 1fr;
+    }
+
+    .resume-manager-form,
+    .resume-version-metrics {
         grid-template-columns: 1fr;
     }
 

@@ -10,7 +10,7 @@ from threading import Lock
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -32,6 +32,8 @@ MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 MAX_AI_TEXT_LENGTH = 8000
 MAX_SKILL_INPUT_LENGTH = 12000
 MAX_APPLICATION_MATERIALS_INPUT_LENGTH = 16000
+MAX_RESUME_VERSIONS = 10
+MAX_RESUME_LABEL_LENGTH = 100
 GEMINI_REQUESTS_PER_MINUTE = 5
 GEMINI_RATE_LIMIT_WINDOW_SECONDS = 60
 LEARNING_STATUSES = {"not_started", "in_progress", "completed"}
@@ -218,10 +220,58 @@ def verify_supabase_user():
         return None, (jsonify({"error": "Could not reach the authentication service. Check your connection."}), 503)
 
 
-def verify_supabase_job_seeker():
-    _, error_response = verify_supabase_user()
-    if error_response:
-        return error_response
+def fetch_supabase_user_identity():
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        return None, (jsonify({
+            "error": "CareerLens authentication is not configured."
+        }), 503)
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        return None, (jsonify({
+            "error": "Please sign in before using this tool."
+        }), 401)
+    user_request = Request(
+        f"{SUPABASE_URL}/auth/v1/user",
+        headers={
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": authorization,
+        },
+    )
+    try:
+        with urlopen(user_request, timeout=5) as response:
+            user = json.loads(response.read().decode("utf-8"))
+            if not isinstance(user, dict) or not isinstance(user.get("id"), str):
+                app.logger.warning("Supabase returned an invalid authenticated-user response.")
+                return None, (jsonify({
+                    "error": "Could not verify the authenticated user."
+                }), 502)
+            return user, None
+    except HTTPError as error:
+        if error.code in (400, 401, 403):
+            return None, (jsonify({
+                "error": "Your session has expired. Please sign in again."
+            }), 401)
+        app.logger.warning("Supabase authentication returned HTTP %s", error.code)
+        return None, (jsonify({
+            "error": "Authentication service is temporarily unavailable."
+        }), 502)
+    except (URLError, TimeoutError):
+        app.logger.error("Could not reach Supabase to verify the user session.")
+        return None, (jsonify({
+            "error": "Could not reach the authentication service. Check your connection."
+        }), 503)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, AttributeError):
+        app.logger.warning("Supabase returned an unreadable authenticated-user response.")
+        return None, (jsonify({
+            "error": "Could not verify the authenticated user."
+        }), 502)
+
+
+def verify_supabase_job_seeker_role():
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        return jsonify({"error": "Authentication service is not configured."}), 503
+    if not request.headers.get("Authorization", "").startswith("Bearer "):
+        return jsonify({"error": "Please sign in before using this tool."}), 401
 
     role_request = Request(
         f"{SUPABASE_URL}/rest/v1/rpc/is_job_seeker",
@@ -239,18 +289,45 @@ def verify_supabase_job_seeker():
     except HTTPError as error:
         app.logger.warning("Supabase role check returned HTTP %s", error.code)
         if error.code in (400, 401, 403):
-            return jsonify({"error": "Your session has expired. Please sign in again."}), 401
-        return jsonify({"error": "Could not verify access to this career tool."}), 502
+            return jsonify({
+                "error": "Your session has expired. Please sign in again."
+            }), 401
+        return jsonify({
+            "error": "Could not verify access to this career tool."
+        }), 502
     except (URLError, TimeoutError):
         app.logger.error("Could not reach Supabase to verify the account type.")
-        return jsonify({"error": "Could not verify access to this career tool. Check your connection."}), 503
+        return jsonify({
+            "error": "Could not verify access to this career tool. Check your connection."
+        }), 503
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
         app.logger.warning("Supabase returned an unreadable account-type response.")
-        return jsonify({"error": "Could not verify access to this career tool."}), 502
+        return jsonify({
+            "error": "Could not verify access to this career tool."
+        }), 502
 
     if is_job_seeker is not True:
-        return jsonify({"error": "This feature is available to job seeker accounts."}), 403
+        return jsonify({
+            "error": "This feature is available to job seeker accounts."
+        }), 403
     return None
+
+
+def verify_supabase_job_seeker_identity():
+    user, error_response = fetch_supabase_user_identity()
+    if error_response:
+        return None, error_response
+    role_error = verify_supabase_job_seeker_role()
+    if role_error:
+        return None, role_error
+    return user, None
+
+
+def verify_supabase_job_seeker():
+    _, error_response = verify_supabase_user()
+    if error_response:
+        return error_response
+    return verify_supabase_job_seeker_role()
 
 
 def verify_supabase_job_provider():
@@ -686,6 +763,21 @@ class ResumePdfError(Exception):
         self.reason = reason
 
 
+def read_pdf_upload(resume_file):
+    filename = getattr(resume_file, "filename", "")
+    mimetype = getattr(resume_file, "mimetype", "")
+    if not isinstance(filename, str) or not filename.lower().endswith(".pdf"):
+        raise ValueError("Only PDF résumés are supported.")
+    if mimetype not in {"application/pdf", "application/octet-stream"}:
+        raise ValueError("Only PDF résumés are supported.")
+    pdf_bytes = resume_file.read(MAX_FILE_SIZE + 1)
+    if len(pdf_bytes) > MAX_FILE_SIZE:
+        raise ValueError("The PDF must be 5 MB or smaller.")
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise ValueError("This file does not appear to be a valid PDF.")
+    return pdf_bytes
+
+
 def extract_resume_text(pdf_bytes):
     try:
         reader = PdfReader(BytesIO(pdf_bytes))
@@ -702,6 +794,90 @@ def extract_resume_text(pdf_bytes):
     if not resume_text:
         raise ResumePdfError("empty")
     return resume_text
+
+
+def resume_proxy_error(status, payload):
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if code in {"42P01", "PGRST202", "PGRST204", "PGRST205"}:
+        return jsonify({
+            "error": (
+                "Résumé version management is not set up yet. Run "
+                "backend/migrations/phase22_resume_versions.sql and "
+                "backend/migrations/phase28_resume_version_management.sql "
+                "in the Supabase SQL Editor."
+            )
+        }), 503
+    if code == "23514":
+        return jsonify({
+            "error": "You can save up to 10 résumé versions. Delete a version before adding another."
+        }), 409
+    if status in (401, 403):
+        return jsonify({"error": "Your session cannot access these résumé versions."}), status
+    app.logger.warning("Supabase résumé-version request failed with HTTP %s", status)
+    return jsonify({"error": "Résumé version data is temporarily unavailable."}), 502
+
+
+def supabase_storage_request(method, object_path, file_bytes=None):
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        return 503, {"code": "SERVICE_UNAVAILABLE"}
+    headers = {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": request.headers.get("Authorization", ""),
+        "Accept": "application/json",
+    }
+    data = None
+    if file_bytes is not None:
+        data = file_bytes
+        headers["Content-Type"] = "application/pdf"
+        headers["x-upsert"] = "false"
+    encoded_path = quote(object_path, safe="/")
+    storage_request = Request(
+        f"{SUPABASE_URL}/storage/v1/object/application-resumes/{encoded_path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urlopen(storage_request, timeout=15) as response:
+            response_body = response.read()
+            if not response_body:
+                return response.status, None
+            try:
+                return response.status, json.loads(response_body)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return response.status, None
+    except HTTPError as error:
+        response_body = error.read()
+        try:
+            error_payload = json.loads(response_body) if response_body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            error_payload = {}
+        app.logger.warning(
+            "Supabase Storage request failed with HTTP %s",
+            error.code,
+        )
+        return error.code, error_payload
+    except (URLError, TimeoutError):
+        app.logger.error("Could not reach Supabase Storage for an authenticated request.")
+        return 503, {"code": "SERVICE_UNAVAILABLE"}
+
+
+def parse_resume_version_id(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, AttributeError):
+        return None
+
+
+def validated_resume_label(value):
+    if not isinstance(value, str):
+        raise ValueError("Enter a résumé label.")
+    label = value.strip()
+    if not label or len(label) > MAX_RESUME_LABEL_LENGTH:
+        raise ValueError("The résumé label must be between 1 and 100 characters.")
+    return label
 
 
 def calculate_first_response_time_hours(events):
@@ -779,13 +955,15 @@ def skill_gap():
     resume_text = ""
     resume_file = request.files.get("resume")
     if resume_file and resume_file.filename:
-        if not resume_file.filename.lower().endswith(".pdf"):
-            return jsonify({"error": "Only PDF résumés are supported."}), 400
-        if resume_file.mimetype not in {"application/pdf", "application/octet-stream"}:
-            return jsonify({"error": "Only PDF résumés are supported."}), 400
-        pdf_bytes = resume_file.read(MAX_FILE_SIZE + 1)
-        if len(pdf_bytes) > MAX_FILE_SIZE:
-            return jsonify({"error": "The PDF must be 5 MB or smaller."}), 400
+        try:
+            pdf_bytes = read_pdf_upload(resume_file)
+        except ValueError as error:
+            message = (
+                "We couldn't read this PDF. Please try another PDF."
+                if "valid PDF" in str(error)
+                else str(error)
+            )
+            return jsonify({"error": message}), 400
         try:
             resume_text = extract_resume_text(pdf_bytes)
         except ResumePdfError as error:
@@ -815,6 +993,246 @@ def skill_gap():
             "has been installed."
         )
     return jsonify(result)
+
+
+@app.route("/api/resumes", methods=["GET"])
+def list_resume_versions():
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+
+    status, versions = supabase_rest_request(
+        "resume_versions?select=id,label,storage_path,file_size,created_at"
+        "&order=created_at.desc&limit=11"
+    )
+    if not 200 <= status < 300:
+        return resume_proxy_error(status, versions)
+    if not isinstance(versions, list) or len(versions) > MAX_RESUME_VERSIONS:
+        app.logger.warning("Supabase returned an invalid résumé-version list.")
+        return jsonify({"error": "The résumé-version response was invalid."}), 502
+    response = jsonify({"resumes": versions, "limit": MAX_RESUME_VERSIONS})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/resumes", methods=["POST"])
+def create_resume_version():
+    user, error_response = verify_supabase_job_seeker_identity()
+    if error_response:
+        return error_response
+    try:
+        user_id = str(uuid.UUID(user["id"]))
+    except (KeyError, ValueError, TypeError, AttributeError):
+        app.logger.warning("Supabase returned an invalid user identifier for résumé upload.")
+        return jsonify({"error": "Could not verify the authenticated user."}), 502
+
+    try:
+        label = validated_resume_label(request.form.get("label"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    resume_file = request.files.get("resume")
+    if resume_file is None:
+        return jsonify({"error": "Choose a PDF résumé to upload."}), 400
+    try:
+        pdf_bytes = read_pdf_upload(resume_file)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    status, versions = supabase_rest_request(
+        "resume_versions?select=id&limit=11"
+    )
+    if not 200 <= status < 300:
+        return resume_proxy_error(status, versions)
+    if not isinstance(versions, list):
+        app.logger.warning("Supabase returned an invalid résumé-version count.")
+        return jsonify({"error": "The résumé-version response was invalid."}), 502
+    if len(versions) >= MAX_RESUME_VERSIONS:
+        return jsonify({
+            "error": "You can save up to 10 résumé versions. Delete a version before adding another."
+        }), 409
+
+    version_id = str(uuid.uuid4())
+    storage_path = f"{user_id}/versions/{version_id}.pdf"
+    storage_status, _ = supabase_storage_request(
+        "POST",
+        storage_path,
+        pdf_bytes,
+    )
+    if not 200 <= storage_status < 300:
+        return jsonify({
+            "error": "The résumé could not be uploaded. Please try again."
+        }), 502
+
+    status, version = supabase_rest_request(
+        "resume_versions?select=id,label,storage_path,file_size,created_at",
+        method="POST",
+        payload={
+            "id": version_id,
+            "label": label,
+            "storage_path": storage_path,
+            "file_size": len(pdf_bytes),
+        },
+    )
+    if not 200 <= status < 300:
+        cleanup_status, _ = supabase_storage_request("DELETE", storage_path)
+        if not 200 <= cleanup_status < 300 and cleanup_status != 404:
+            app.logger.error(
+                "Résumé metadata save failed and uploaded-file cleanup returned HTTP %s.",
+                cleanup_status,
+            )
+            return jsonify({
+                "error": (
+                    "Résumé metadata could not be saved and uploaded-file cleanup "
+                    "could not be confirmed. Please contact support."
+                )
+            }), 502
+        return resume_proxy_error(status, version)
+    if not isinstance(version, list) or len(version) != 1:
+        app.logger.warning("Supabase returned an invalid résumé-version insert response.")
+        cleanup_status, _ = supabase_storage_request("DELETE", storage_path)
+        if not 200 <= cleanup_status < 300 and cleanup_status != 404:
+            app.logger.error(
+                "Résumé insert response was invalid and uploaded-file cleanup returned HTTP %s.",
+                cleanup_status,
+            )
+        return jsonify({"error": "The résumé version could not be saved."}), 502
+    return jsonify({"resume": version[0]}), 201
+
+
+@app.route("/api/resumes/<string:version_id>", methods=["PATCH"])
+def update_resume_version(version_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    parsed_version_id = parse_resume_version_id(version_id)
+    if parsed_version_id is None:
+        return jsonify({"error": "Enter a valid résumé version identifier."}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) != {"label"}:
+        return jsonify({"error": "Provide only a résumé label."}), 400
+    try:
+        label = validated_resume_label(payload.get("label"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    status, versions = supabase_rest_request(
+        "resume_versions?select=id,label,storage_path,file_size,created_at"
+        f"&id=eq.{parsed_version_id}",
+        method="PATCH",
+        payload={"label": label},
+    )
+    if not 200 <= status < 300:
+        return resume_proxy_error(status, versions)
+    if not isinstance(versions, list):
+        app.logger.warning("Supabase returned an invalid résumé-version update response.")
+        return jsonify({"error": "The résumé-version response was invalid."}), 502
+    if not versions:
+        return jsonify({"error": "Résumé version not found."}), 404
+    return jsonify({"resume": versions[0]})
+
+
+@app.route("/api/resumes/<string:version_id>", methods=["DELETE"])
+def delete_resume_version(version_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    parsed_version_id = parse_resume_version_id(version_id)
+    if parsed_version_id is None:
+        return jsonify({"error": "Enter a valid résumé version identifier."}), 400
+
+    status, versions = supabase_rest_request(
+        "resume_versions?select=id,storage_path"
+        f"&id=eq.{parsed_version_id}&limit=1"
+    )
+    if not 200 <= status < 300:
+        return resume_proxy_error(status, versions)
+    if not isinstance(versions, list):
+        app.logger.warning("Supabase returned an invalid résumé-version response.")
+        return jsonify({"error": "The résumé-version response was invalid."}), 502
+    if not versions:
+        return jsonify({"error": "Résumé version not found."}), 404
+
+    version = versions[0]
+    linked_status, linked_applications = supabase_rest_request(
+        "job_applications?select=id"
+        f"&resume_version_id=eq.{parsed_version_id}&limit=1"
+    )
+    if not 200 <= linked_status < 300:
+        return resume_proxy_error(linked_status, linked_applications)
+    if not isinstance(linked_applications, list):
+        app.logger.warning("Supabase returned an invalid résumé application-reference response.")
+        return jsonify({"error": "Application references could not be checked."}), 502
+
+    delete_status, deleted = supabase_rest_request(
+        "resume_versions"
+        f"?id=eq.{parsed_version_id}&select=id",
+        method="DELETE",
+    )
+    if not 200 <= delete_status < 300:
+        return resume_proxy_error(delete_status, deleted)
+
+    if linked_applications:
+        return jsonify({"deleted": True, "file_retained": True})
+
+    storage_status, _ = supabase_storage_request("DELETE", version["storage_path"])
+    if 200 <= storage_status < 300 or storage_status == 404:
+        return jsonify({"deleted": True, "file_retained": False})
+
+    referenced_status, references = supabase_rest_request(
+        "job_applications?select=id&resume_path=eq."
+        f"{quote(version['storage_path'], safe='')}&limit=1"
+    )
+    if 200 <= referenced_status < 300 and isinstance(references, list) and references:
+        return jsonify({"deleted": True, "file_retained": True})
+    if not 200 <= referenced_status < 300:
+        app.logger.warning(
+            "Could not confirm application references after résumé cleanup returned HTTP %s.",
+            storage_status,
+        )
+    else:
+        app.logger.warning(
+            "Stored résumé cleanup returned HTTP %s after metadata deletion.",
+            storage_status,
+        )
+    return jsonify({
+        "error": (
+            "The résumé version was removed, but cleanup of its stored file "
+            "could not be confirmed."
+        )
+    }), 502
+
+
+@app.route("/api/resumes/insights", methods=["GET"])
+def resume_version_insights():
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    status, records = supabase_rest_request(
+        "rpc/get_resume_version_insights",
+        method="POST",
+        payload={},
+    )
+    if not 200 <= status < 300:
+        return resume_proxy_error(status, records)
+    if not isinstance(records, list):
+        app.logger.warning("Supabase returned an invalid résumé-insights response.")
+        return jsonify({"error": "Résumé insights could not be loaded."}), 502
+    allowed_fields = {
+        "resume_version_id",
+        "label",
+        "created_at",
+        "applications_sent",
+        "shortlisted_or_better",
+        "shortlist_rate",
+        "sufficient_data",
+    }
+    if any(not isinstance(record, dict) or not set(record).issubset(allowed_fields)
+           for record in records):
+        app.logger.warning("Supabase returned unexpected résumé-insights fields.")
+        return jsonify({"error": "Résumé insights could not be loaded."}), 502
+    response = jsonify({"insights": records})
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def job_recommendation_proxy_error(status, payload):

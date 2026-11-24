@@ -44,6 +44,33 @@ across multiple Gunicorn workers or instances.
   provider/configuration failures.
 - **Data handling:** The profile and listing are assembled server-side and sent to Gemini only after consent. The generated draft is saved in the private `application_material_drafts` table.
 
+### Résumé version management
+
+These routes require an authenticated job seeker and use the caller's bearer
+token for Supabase REST and Storage operations. Run
+`backend/migrations/phase28_resume_version_management.sql` after Phase 22.
+
+- `GET /api/resumes` returns the seeker's own résumé version metadata and the
+  10-version limit.
+- `POST /api/resumes` accepts `multipart/form-data` with a required `label`
+  (1–100 characters) and `resume` PDF. The server validates the PDF filename,
+  MIME type, 5 MB maximum, and `%PDF-` signature before uploading it to the
+  caller's own folder in the private bucket. Success is `201` with a `resume`
+  metadata object; invalid files or labels return `400`, and the account limit
+  returns `409`.
+- `PATCH /api/resumes/<id>` accepts only a `label` field and renames an
+  owner-held version; success is `200`, invalid input is `400`, and an
+  inaccessible/missing version is `404`.
+- `DELETE /api/resumes/<id>` removes the version metadata and detaches
+  `job_applications.resume_version_id`. The stored object is removed only when
+  it is not referenced by an application; an application-submitted file is
+  retained. Success is `200` with `deleted` and `file_retained` flags.
+- `GET /api/resumes/insights` returns only per-version counts and a shortlist
+  rate when at least five applications exist. “Shortlisted or better” means
+  Shortlisted, Interview, Offer, or Hired. The figures are descriptive, not a
+  hiring prediction, and no applicant identities are returned. The rate is
+  `null` below the threshold.
+
 ## 2. Public endpoints
 
 ### `GET /`
@@ -303,8 +330,9 @@ to rely on Supabase RLS for listing/application ownership.
   scheduled interviews. Booked interview slots take precedence over a legacy
   manually-set date, and a cancelled slot is no longer exportable.
 - Résumé version metadata is stored in `public.resume_versions` after applying
-  `backend/migrations/phase22_resume_versions.sql`. Job seekers read and create
-  their own version records through Supabase with RLS; applications reference
+  `backend/migrations/phase22_resume_versions.sql` and
+  `backend/migrations/phase28_resume_version_management.sql`. Job seekers use
+  the authenticated résumé endpoints documented above; applications reference
   the selected `resume_version_id`. Providers can read version metadata and
   private storage objects only when that version is attached to one of their
   applications. Legacy applications with `resume_version_id = null` continue

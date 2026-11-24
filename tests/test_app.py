@@ -50,6 +50,7 @@ class CareerLensApiTests(unittest.TestCase):
 
         response = MagicMock()
         response.__enter__.return_value = response
+        response.read.return_value = b'{"id":"11111111-1111-4111-8111-111111111111"}'
         self.auth_request = patch("backend.app.urlopen", return_value=response)
         self.auth_urlopen = self.auth_request.start()
         self.addCleanup(self.auth_request.stop)
@@ -355,12 +356,425 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertIn("version.user_id = (select auth.uid())", migration)
         self.assertIn("version.storage_path = job_applications.resume_path", migration)
         self.assertIn("char_length(label) <= 100", migration)
+        seeker_read_policy = migration.split(
+            'create policy "Job seekers can view their résumé versions"', 1
+        )[1].split("drop policy", 1)[0]
+        self.assertIn("user_id = (select auth.uid())", seeker_read_policy)
+        self.assertIn("(select public.is_job_seeker())", seeker_read_policy)
         self.assertIn("notify pgrst, 'reload schema';", migration)
         self.assertIn('id="resume-version-select"', template)
         self.assertIn('name="resume_version_id"', template)
-        self.assertIn('from("resume_versions").insert', script)
+        self.assertIn('id="resume-manager-form"', template)
+        self.assertIn('careerApi("/api/resumes"', script)
+        self.assertNotIn('from("resume_versions").insert', script)
+        self.assertNotIn('.from("application-resumes").upload', script)
+        self.assertNotIn('.from("application-resumes").remove', script)
         self.assertIn("resume_version_id: resumeVersionId", script)
         self.assertNotIn("service_role", migration + script)
+
+    def test_resume_management_migration_enforces_owner_limit_and_safe_detachment(self):
+        repository_root = Path(__file__).parents[1]
+        migration = (
+            repository_root
+            / "backend"
+            / "migrations"
+            / "phase28_resume_version_management.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("add column if not exists file_size bigint", migration)
+        self.assertIn("file_size between 1 and 5242880", migration)
+        self.assertIn("pg_advisory_xact_lock", migration)
+        self.assertIn(">= 10", migration)
+        self.assertIn('for update to authenticated', migration)
+        self.assertIn('for delete to authenticated', migration)
+        self.assertIn("on delete set null", (
+            repository_root
+            / "backend"
+            / "migrations"
+            / "phase22_resume_versions.sql"
+        ).read_text(encoding="utf-8").lower())
+        self.assertIn("version.user_id = (select auth.uid())", migration)
+        self.assertIn("(select public.is_job_seeker())", migration)
+        self.assertIn("count(application.id) >= 5", migration)
+        self.assertIn("count(application.id) filter", migration)
+        self.assertIn("'Shortlisted', 'Interview', 'Offer', 'Hired'", migration)
+        self.assertIn("when count(application.id) >= 5 then round", migration)
+        self.assertIn("else null", migration)
+        self.assertIn("applications_sent", migration)
+        self.assertIn("shortlisted_or_better", migration)
+        self.assertIn("notify pgrst, 'reload schema';", migration)
+        self.assertNotIn("applicant_email", migration)
+        self.assertNotIn("applicant_name", migration)
+        self.assertNotIn("applicant_id", migration)
+
+    def test_resume_pdf_upload_requires_pdf_type_size_and_magic_bytes(self):
+        file = MagicMock()
+        file.filename = "resume.pdf"
+        file.mimetype = "application/pdf"
+        file.read.return_value = b"%PDF-1.4 example"
+        self.assertEqual(app_module.read_pdf_upload(file), b"%PDF-1.4 example")
+        file.read.assert_called_once_with(app_module.MAX_FILE_SIZE + 1)
+
+        file.filename = "resume.txt"
+        with self.assertRaisesRegex(ValueError, "Only PDF"):
+            app_module.read_pdf_upload(file)
+
+        file.filename = "resume.pdf"
+        file.mimetype = "text/plain"
+        with self.assertRaisesRegex(ValueError, "Only PDF"):
+            app_module.read_pdf_upload(file)
+
+        file.mimetype = "application/pdf"
+        file.read.return_value = b"x" * (app_module.MAX_FILE_SIZE + 1)
+        with self.assertRaisesRegex(ValueError, "5 MB"):
+            app_module.read_pdf_upload(file)
+
+        file.read.return_value = b"not a PDF"
+        with self.assertRaisesRegex(ValueError, "valid PDF"):
+            app_module.read_pdf_upload(file)
+
+    def test_resume_creation_requires_seeker_role_and_validated_upload(self):
+        unauthenticated = self.client.post("/api/resumes")
+        self.assertEqual(unauthenticated.status_code, 401)
+
+        denied = ({"error": "Job seekers only."}, 403)
+        with patch.object(
+            app_module,
+            "verify_supabase_job_seeker_identity",
+            return_value=(None, denied),
+        ), patch.object(app_module, "supabase_rest_request") as rest_request:
+            response = self.client.post(
+                "/api/resumes",
+                headers={"Authorization": "Bearer provider-session"},
+                data={"label": "Backend v2"},
+            )
+        self.assertEqual(response.status_code, 403)
+        rest_request.assert_not_called()
+
+        user = {"id": "11111111-1111-4111-8111-111111111111"}
+        with (
+            patch.object(
+                app_module,
+                "verify_supabase_job_seeker_identity",
+                return_value=(user, None),
+            ),
+            patch.object(app_module, "supabase_rest_request") as rest_request,
+            patch.object(app_module, "supabase_storage_request") as storage_request,
+        ):
+            missing_label = self.client.post(
+                "/api/resumes",
+                headers={"Authorization": "Bearer seeker-session"},
+                data={
+                    "resume": (io.BytesIO(create_pdf("Resume")), "resume.pdf", "application/pdf")
+                },
+            )
+            bad_magic = self.client.post(
+                "/api/resumes",
+                headers={"Authorization": "Bearer seeker-session"},
+                data={
+                    "label": "Backend v2",
+                    "resume": (io.BytesIO(b"not a PDF"), "resume.pdf", "application/pdf"),
+                },
+            )
+        self.assertEqual(missing_label.status_code, 400)
+        self.assertEqual(bad_magic.status_code, 400)
+        rest_request.assert_not_called()
+        storage_request.assert_not_called()
+
+    def test_resume_identity_verification_uses_authenticated_user_and_seeker_role(self):
+        auth_response = MagicMock()
+        auth_response.__enter__.return_value = auth_response
+        auth_response.read.return_value = (
+            b'{"id":"11111111-1111-4111-8111-111111111111"}'
+        )
+        role_response = MagicMock()
+        role_response.__enter__.return_value = role_response
+        role_response.read.return_value = b"true"
+        with app_module.app.test_request_context(
+            headers={"Authorization": "Bearer resume-session"}
+        ), patch(
+            "backend.app.urlopen",
+            side_effect=[auth_response, role_response],
+        ) as supabase_urlopen:
+            user, error = app_module.verify_supabase_job_seeker_identity()
+
+        self.assertIsNone(error)
+        self.assertEqual(user["id"], "11111111-1111-4111-8111-111111111111")
+        self.assertEqual(supabase_urlopen.call_count, 2)
+        self.assertTrue(
+            supabase_urlopen.call_args_list[0].args[0].full_url.endswith(
+                "/auth/v1/user"
+            )
+        )
+        self.assertTrue(
+            supabase_urlopen.call_args_list[1].args[0].full_url.endswith(
+                "/rest/v1/rpc/is_job_seeker"
+            )
+        )
+        self.assertEqual(
+            supabase_urlopen.call_args_list[1].args[0].get_header("Authorization"),
+            "Bearer resume-session",
+        )
+
+    def test_resume_creation_uploads_with_current_user_and_records_file_size(self):
+        user_id = "11111111-1111-4111-8111-111111111111"
+        version_id = "22222222-2222-4222-8222-222222222222"
+        expected = {
+            "id": version_id,
+            "label": "Backend v2",
+            "storage_path": f"{user_id}/versions/{version_id}.pdf",
+            "file_size": len(create_pdf("Resume")),
+            "created_at": "2026-11-24T12:00:00Z",
+        }
+        with (
+            patch.object(
+                app_module,
+                "verify_supabase_job_seeker_identity",
+                return_value=({"id": user_id}, None),
+            ),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[(200, []), (201, [expected])],
+            ) as rest_request,
+            patch.object(
+                app_module,
+                "supabase_storage_request",
+                return_value=(200, {}),
+            ) as storage_request,
+            patch.object(app_module.uuid, "uuid4", return_value=version_id),
+        ):
+            response = self.client.post(
+                "/api/resumes",
+                headers={"Authorization": "Bearer seeker-session"},
+                data={
+                    "label": "Backend v2",
+                    "resume": (
+                        io.BytesIO(create_pdf("Resume")),
+                        "resume.pdf",
+                        "application/pdf",
+                    ),
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json["resume"], expected)
+        self.assertNotIn("user_id", response.json["resume"])
+        self.assertEqual(storage_request.call_args.args[0], "POST")
+        self.assertEqual(storage_request.call_args.args[1], expected["storage_path"])
+        self.assertEqual(storage_request.call_args.args[2], create_pdf("Resume"))
+        insert_payload = rest_request.call_args_list[1].kwargs["payload"]
+        self.assertEqual(insert_payload["file_size"], len(create_pdf("Resume")))
+        self.assertNotIn("user_id", insert_payload)
+
+    def test_resume_storage_upload_forwards_public_key_and_current_bearer_only(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.status = 200
+        response.read.return_value = b'{"Key":"resume"}'
+        with app_module.app.test_request_context(
+            headers={"Authorization": "Bearer current-user-token"}
+        ), patch("backend.app.urlopen", return_value=response) as storage_urlopen:
+            status, payload = app_module.supabase_storage_request(
+                "POST",
+                "11111111-1111-4111-8111-111111111111/versions/"
+                "22222222-2222-4222-8222-222222222222.pdf",
+                b"%PDF-1.4",
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"Key": "resume"})
+        storage_request = storage_urlopen.call_args.args[0]
+        self.assertIn("/storage/v1/object/application-resumes/", storage_request.full_url)
+        self.assertEqual(
+            storage_request.get_header("Authorization"),
+            "Bearer current-user-token",
+        )
+        self.assertEqual(storage_request.get_header("Apikey"), "public-key")
+        self.assertEqual(storage_request.get_header("Content-type"), "application/pdf")
+        self.assertEqual(storage_request.data, b"%PDF-1.4")
+
+    def test_resume_list_is_limited_and_returns_only_rls_visible_metadata(self):
+        versions = [{
+            "id": "22222222-2222-4222-8222-222222222222",
+            "label": "Backend v2",
+            "storage_path": (
+                "11111111-1111-4111-8111-111111111111/versions/"
+                "22222222-2222-4222-8222-222222222222.pdf"
+            ),
+            "file_size": len(create_pdf("Resume")),
+            "created_at": "2026-11-24T12:00:00Z",
+        }]
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                return_value=(200, versions),
+            ) as rest_request,
+        ):
+            response = self.client.get(
+                "/api/resumes",
+                headers={"Authorization": "Bearer seeker-session"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["resumes"], versions)
+        self.assertEqual(response.json["limit"], 10)
+        self.assertNotIn("user_id", response.json["resumes"][0])
+        self.assertEqual(
+            rest_request.call_args.args[0],
+            "resume_versions?select=id,label,storage_path,file_size,created_at"
+            "&order=created_at.desc&limit=11",
+        )
+
+    def test_resume_creation_enforces_ten_version_limit_before_upload(self):
+        user_id = "11111111-1111-4111-8111-111111111111"
+        versions = [{"id": str(index)} for index in range(10)]
+        with (
+            patch.object(
+                app_module,
+                "verify_supabase_job_seeker_identity",
+                return_value=({"id": user_id}, None),
+            ),
+            patch.object(app_module, "supabase_rest_request", return_value=(200, versions)),
+            patch.object(app_module, "supabase_storage_request") as storage_request,
+        ):
+            response = self.client.post(
+                "/api/resumes",
+                headers={"Authorization": "Bearer seeker-session"},
+                data={
+                    "label": "Backend v11",
+                    "resume": (
+                        io.BytesIO(create_pdf("Resume")),
+                        "resume.pdf",
+                        "application/pdf",
+                    ),
+                },
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("10 résumé versions", response.json["error"])
+        storage_request.assert_not_called()
+
+    def test_resume_insights_return_aggregates_without_applicant_data(self):
+        record = {
+            "resume_version_id": "22222222-2222-4222-8222-222222222222",
+            "label": "Backend v2",
+            "created_at": "2026-11-24T12:00:00Z",
+            "applications_sent": 5,
+            "shortlisted_or_better": 2,
+            "shortlist_rate": 40.0,
+            "sufficient_data": True,
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                return_value=(200, [record]),
+            ) as rest_request,
+        ):
+            response = self.client.get(
+                "/api/resumes/insights",
+                headers={"Authorization": "Bearer seeker-session"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["insights"], [record])
+        self.assertNotIn("applicant_id", response.get_data(as_text=True))
+        self.assertNotIn("applicant_email", response.get_data(as_text=True))
+        self.assertEqual(rest_request.call_args.args[0], "rpc/get_resume_version_insights")
+        self.assertEqual(rest_request.call_args.kwargs["payload"], {})
+
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(app_module, "supabase_rest_request", return_value=(200, [])),
+        ):
+            empty = self.client.get(
+                "/api/resumes/insights",
+                headers={"Authorization": "Bearer seeker-session"},
+            )
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.json["insights"], [])
+
+    def test_resume_management_endpoints_require_authentication(self):
+        version_id = "22222222-2222-4222-8222-222222222222"
+        responses = [
+            self.client.get("/api/resumes"),
+            self.client.post("/api/resumes"),
+            self.client.patch(f"/api/resumes/{version_id}", json={"label": "Updated"}),
+            self.client.delete(f"/api/resumes/{version_id}"),
+            self.client.get("/api/resumes/insights"),
+        ]
+        self.assertEqual([response.status_code for response in responses], [401] * 5)
+
+    def test_resume_rename_validates_label_and_uses_owner_scoped_update(self):
+        version_id = "22222222-2222-4222-8222-222222222222"
+        version = {
+            "id": version_id,
+            "label": "Backend v2",
+            "storage_path": "11111111-1111-4111-8111-111111111111/versions/"
+            f"{version_id}.pdf",
+            "file_size": len(create_pdf("Resume")),
+            "created_at": "2026-11-24T12:00:00Z",
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                return_value=(200, [version]),
+            ) as rest_request,
+        ):
+            renamed = self.client.patch(
+                f"/api/resumes/{version_id}",
+                headers={"Authorization": "Bearer seeker-session"},
+                json={"label": "Backend v2"},
+            )
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.json["resume"], version)
+        self.assertEqual(rest_request.call_args.args[0], (
+            "resume_versions?select=id,label,storage_path,file_size,created_at"
+            f"&id=eq.{version_id}"
+        ))
+        self.assertEqual(rest_request.call_args.kwargs["payload"], {"label": "Backend v2"})
+
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(app_module, "supabase_rest_request") as unused_request,
+        ):
+            invalid = self.client.patch(
+                f"/api/resumes/{version_id}",
+                headers={"Authorization": "Bearer seeker-session"},
+                json={"label": "x" * 101},
+            )
+        self.assertEqual(invalid.status_code, 400)
+        unused_request.assert_not_called()
+
+    def test_resume_delete_detaches_application_version_and_retains_submitted_file(self):
+        version_id = "22222222-2222-4222-8222-222222222222"
+        version = {
+            "id": version_id,
+            "storage_path": f"11111111-1111-4111-8111-111111111111/versions/{version_id}.pdf",
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, [version]),
+                    (200, [{"id": "application-1"}]),
+                    (204, None),
+                ],
+            ) as rest_request,
+            patch.object(app_module, "supabase_storage_request") as storage_request,
+        ):
+            response = self.client.delete(
+                f"/api/resumes/{version_id}",
+                headers={"Authorization": "Bearer seeker-session"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json, {"deleted": True, "file_retained": True})
+        self.assertEqual(rest_request.call_count, 3)
+        self.assertEqual(rest_request.call_args_list[2].kwargs["method"], "DELETE")
+        storage_request.assert_not_called()
 
     def test_notification_calendar_migration_notifies_each_status_transition(self):
         repository_root = Path(__file__).parents[1]

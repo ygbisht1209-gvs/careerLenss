@@ -7,7 +7,7 @@
 
 | Command | Result |
 |---|---|
-| `python -m unittest discover -s tests -v` | 136 tests passed, including response-metric checks and structured rejection validation, ownership, note sharing, and privacy contracts |
+| `python -m unittest discover -s tests -v` | 148 tests passed, including résumé-version upload validation, ten-version limit, authenticated storage forwarding, owner-scoped management, deletion detachment, and aggregate insight threshold/math contracts |
 | `node --test tests/test_dashboard_ui.cjs tests/test_learning_ui.cjs` | 10 tests passed |
 | `node --check backend/static/script.js` | Passed |
 | `node --check backend/static/dashboard-ui.js` | Passed |
@@ -24,7 +24,12 @@ and logging, Gemini caps, and SQL policy contracts. Node tests cover dashboard
 and learning summary helpers. Résumé-version tests inspect that seeker access
 is owner-scoped, provider access requires the version to be selected on an
 application for a provider-owned listing, and applications cannot mismatch the
-selected version and its storage path. Notification tests verify every
+selected version and its storage path. Phase 28 tests cover PDF
+filename/MIME/size/signature validation, authenticated anon-key/bearer
+forwarding, the ten-version cap, owner-only rename/delete policies,
+`ON DELETE SET NULL` detachment, application-file retention, and the
+five-application shortlist-rate threshold and calculation. The insights API
+returns only per-version aggregate fields. Notification tests verify every
 application stage produces an event and interview calendar downloads are
 authenticated and limited to applications visible through RLS. Interview-slot
 tests inspect seeker/provider ownership policies, conflict locking and overlap
@@ -56,7 +61,8 @@ applications, projects, learning plans, bookmarks, STAR stories, notifications,
 status history, and application materials, and confirm applicant-facing routes
 do not expose provider review notes. They inspect SQL text only: they do not
 execute SQL or prove that a deployed Supabase project has the expected grants,
-policies, migrations, or Storage settings. No live Supabase, Gemini, or
+policies, migrations, or Storage settings. The Phase 28 migration was not
+executed against a live Supabase project. No live Supabase, Gemini, or
 deployed-site request was made as part of these automated tests.
 
 The Flask tests verify bearer-token forwarding and route role checks with

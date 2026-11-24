@@ -91,6 +91,13 @@ is not shared across multiple workers or instances.
     explicitly shared. The Phase 27 RPC updates the stage and rejection
     details atomically, and applicant reads redact unshared notes. Migrations
     are manual; the app does not apply them automatically.
+16. To manage multiple résumé versions, run
+    [`backend/migrations/phase28_resume_version_management.sql`](backend/migrations/phase28_resume_version_management.sql)
+    after Phase 22. It adds upload-size metadata, enforces a 10-version owner
+    limit, permits owner-only renaming and deletion, and provides aggregate
+    version insights. Deleting a version detaches its application reference;
+    submitted application files remain protected by the existing Storage
+    policy. Migrations are manual; the app does not apply them automatically.
 
 The learning catalogue is intentionally administrator-managed through the
 Supabase SQL Editor. Add a category and resources only after verifying their
@@ -171,6 +178,19 @@ counted only from the user's own CareerLens submissions, without exposing
 storage paths. Learning completion remains self-reported. Recommendations and
 skill analysis may cite project descriptions and contributions as user-entered
 context; skills entered only as project tags remain unverified mentions.
+
+## Résumé version management
+
+After Phase 22, run
+[`backend/migrations/phase28_resume_version_management.sql`](backend/migrations/phase28_resume_version_management.sql)
+to enable résumé management. In **My applications**, job seekers can keep up
+to 10 labeled PDF versions (5 MB maximum each), rename or delete them, and
+select a version when applying. Per-version application and shortlisted-or-
+better counts are descriptive; a shortlist rate is shown only for at least five
+applications and is not a hiring prediction. Deleting a version detaches its
+metadata while preserving files already submitted with applications. RLS
+limits version management to the owner, and providers can access only a résumé
+version selected for an application on their listing.
 
 ## Explainable job recommendations
 
@@ -322,8 +342,12 @@ optional migrations for every feature under test before starting.
   tracker, test sorting and overdue follow-up, and confirm delete asks first.
   Save a labeled résumé version, apply using it, then apply to another test job
   with a different version and confirm each provider can access only its
-  selected version. Change application stages and confirm the applicant receives
-  status notifications; download the interview calendar from the notification.
+  selected version. Rename a version, verify the insights show counts and hide
+  rates below five applications, create 10 versions and confirm another upload
+  is rejected, then delete a used version and confirm its submitted file remains
+  available to the relevant provider. Change application stages and confirm the
+  applicant receives status notifications; download the interview calendar from
+  the notification.
 - **Interview booking:** offer several future times as a provider, book one as
   the applicant, verify an overlapping slot cannot be booked for another
   application with the same provider, and test cancellation from both accounts.
@@ -506,6 +530,10 @@ applicant data.
   Job seekers may retain labeled résumé versions and choose which version is
   attached to each application; providers can access only the selected version
   for their listing.
+  The résumé library supports upload, rename, delete, and descriptive
+  per-version application counts and shortlist rates. Each rate is withheld
+  below five applications; deleting a used version detaches the metadata while
+  retaining the résumé file already submitted with its applications.
   Providers can review CVs, move candidates through CV review, shortlist,
   interview, offer, hire, or reject stages, add private reviewer notes, and
   optionally record an interview date. Applicants can see their current stage,
