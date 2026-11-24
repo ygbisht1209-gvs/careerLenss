@@ -260,6 +260,7 @@ begin
                 ),
                 new.id::text || ':unavailable:' || pg_catalog.gen_random_uuid()::text
             ) on conflict do nothing;
+        end if;
     elsif tg_op = 'UPDATE'
         and old.status = 'booked'
         and new.status = 'cancelled' then

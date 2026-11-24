@@ -74,6 +74,8 @@ let savedJobIds = new Set();
 let currentStarStories = [];
 let starStoriesAvailable = false;
 let editingStarStoryId = null;
+let liveUpdateTimer = null;
+let liveUpdateInFlight = false;
 
 function setMessage(element, message, kind = "") {
     if (!element) return;
@@ -265,6 +267,7 @@ function showAuthScreen() {
 }
 
 function clearWorkspaceData() {
+    stopLiveUpdates();
     currentApplications = [];
     currentCareerProfile = {};
     careerProjects = [];
@@ -320,7 +323,6 @@ function clearWorkspaceData() {
     const applicationSort = document.getElementById("application-sort");
     if (applicationSort) applicationSort.value = "follow-up";
     renderApplications();
-    document.getElementById("profile-form").reset();
     document.getElementById("my-profile-form").reset();
     setMessage(document.getElementById("my-profile-message"), "");
     document.getElementById("employer-profile-form").reset();
@@ -362,9 +364,11 @@ function clearWorkspaceData() {
     document.getElementById("profile-stat").textContent = "Build it";
     document.getElementById("skill-count").textContent = "--";
     document.getElementById("skill-results").hidden = true;
-    document.getElementById("skill-gap-list").replaceChildren();
+    document.getElementById("skill-evidence-found-list").replaceChildren();
+    document.getElementById("skill-needs-assessment-list").replaceChildren();
+    document.getElementById("skill-no-evidence-list").replaceChildren();
     setMessage(document.getElementById("app-message"), "");
-    setMessage(document.getElementById("profile-message"), "");
+    setMessage(document.getElementById("my-profile-message"), "");
     setMessage(document.getElementById("portfolio-message"), "");
     setMessage(document.getElementById("dashboard-message"), "");
     setMessage(document.getElementById("skill-message"), "");
@@ -448,9 +452,44 @@ async function openWorkspace(user) {
                 loadResumeManagement(),
             ]);
         }
+        startLiveUpdates();
     } catch (error) {
         loadingUserId = null;
         setMessage(document.getElementById("app-message"), supabaseErrorMessage(error), "error");
+    }
+}
+
+function stopLiveUpdates() {
+    if (liveUpdateTimer !== null) {
+        window.clearInterval(liveUpdateTimer);
+        liveUpdateTimer = null;
+    }
+    liveUpdateInFlight = false;
+}
+
+function startLiveUpdates() {
+    stopLiveUpdates();
+    liveUpdateTimer = window.setInterval(() => {
+        if (document.hidden || liveUpdateInFlight || !currentUser || !currentAccountType) return;
+        void refreshLiveData();
+    }, 15000);
+}
+
+async function refreshLiveData() {
+    if (liveUpdateInFlight || !currentUser || !currentAccountType) return;
+    liveUpdateInFlight = true;
+    try {
+        if (currentAccountType === "job_provider") {
+            await Promise.all([loadProviderWorkspace(), loadNotifications()]);
+        } else {
+            await Promise.all([
+                loadJobBoard(false),
+                loadSeekerApplications(),
+                loadNotifications()
+            ]);
+        }
+    } finally {
+        liveUpdateInFlight = false;
     }
 }
 
@@ -789,13 +828,15 @@ async function loadApplicationAnalytics() {
     }
 }
 
-async function loadJobBoard() {
+async function loadJobBoard(showLoading = true) {
     const userId = currentUser?.id;
     if (!userId || currentAccountType !== "job_seeker") return;
-    setMessage(
-        document.getElementById("job-board-message"),
-        "Comparing your profile with published jobs..."
-    );
+    if (showLoading) {
+        setMessage(
+            document.getElementById("job-board-message"),
+            "Comparing your profile with published jobs..."
+        );
+    }
     try {
         const [result, savedResult, responsivenessResult] = await Promise.all([
             careerApi("/api/job-recommendations"),
