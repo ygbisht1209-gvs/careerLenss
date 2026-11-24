@@ -4,6 +4,9 @@ import os
 import re
 import time
 import uuid
+from hashlib import blake2b
+from math import ceil, isfinite
+from threading import Lock
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -14,12 +17,12 @@ from urllib.request import Request, urlopen
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 from pypdf import PdfReader
-from werkzeug.exceptions import BadRequest
+from werkzeug.exceptions import BadRequest, HTTPException, InternalServerError
 
 from backend.interview_prep import build_interview_prep
-from backend.job_matching import build_job_recommendations
+from backend.job_matching import build_job_recommendations, build_job_what_if
 from backend.learning import recommend_learning_resources
-from backend.skill_gap import analyze_skill_gaps
+from backend.skill_gap import analyze_skill_gaps, normalize_skill_name
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
@@ -28,9 +31,19 @@ load_dotenv(Path(__file__).with_name(".env"))
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 MAX_AI_TEXT_LENGTH = 8000
 MAX_SKILL_INPUT_LENGTH = 12000
+MAX_APPLICATION_MATERIALS_INPUT_LENGTH = 16000
+GEMINI_REQUESTS_PER_MINUTE = 5
+GEMINI_RATE_LIMIT_WINDOW_SECONDS = 60
 LEARNING_STATUSES = {"not_started", "in_progress", "completed"}
 EMPLOYER_AI_TASKS = {"improve_job_description", "interview_kit"}
+REJECTION_FEEDBACK_CODES = {
+    "skills_gap", "experience_level", "position_filled",
+    "role_requirements_changed", "application_incomplete", "other",
+}
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE + 128 * 1024
+_GEMINI_RATE_LIMIT_SALT = os.urandom(16)
+_GEMINI_RATE_LIMIT_LOCK = Lock()
+_GEMINI_RATE_LIMIT_WINDOWS = {}
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -40,6 +53,73 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 NOTIFICATION_EMAIL_FROM = os.environ.get(
     "NOTIFICATION_EMAIL_FROM", "CareerLens <notifications@example.com>"
 )
+
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(error):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": error.description}), error.code
+    return error
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_exception(error):
+    app.logger.error(
+        "Unhandled request failure endpoint=%s exception_type=%s",
+        request.endpoint or "unknown",
+        type(error).__name__,
+    )
+    if request.path.startswith("/api/"):
+        return jsonify({
+            "error": "An unexpected server error occurred. Please try again."
+        }), 500
+    return InternalServerError()
+
+
+def consume_gemini_request():
+    authorization = request.headers.get("Authorization", "")
+    client_identifier = (
+        authorization
+        if authorization.startswith("Bearer ")
+        else request.remote_addr or "unknown"
+    )
+    key = blake2b(
+        client_identifier.encode("utf-8"),
+        key=_GEMINI_RATE_LIMIT_SALT,
+        digest_size=16,
+    ).digest()
+    now = time.monotonic()
+    with _GEMINI_RATE_LIMIT_LOCK:
+        window_start, count = _GEMINI_RATE_LIMIT_WINDOWS.get(key, (now, 0))
+        elapsed = now - window_start
+        if elapsed >= GEMINI_RATE_LIMIT_WINDOW_SECONDS:
+            window_start, count, elapsed = now, 0, 0
+        if count >= GEMINI_REQUESTS_PER_MINUTE:
+            return max(1, ceil(GEMINI_RATE_LIMIT_WINDOW_SECONDS - elapsed))
+        _GEMINI_RATE_LIMIT_WINDOWS[key] = (window_start, count + 1)
+        if len(_GEMINI_RATE_LIMIT_WINDOWS) > 5000:
+            expired = [
+                stored_key
+                for stored_key, (start, _) in _GEMINI_RATE_LIMIT_WINDOWS.items()
+                if now - start >= GEMINI_RATE_LIMIT_WINDOW_SECONDS
+            ]
+            for stored_key in expired:
+                _GEMINI_RATE_LIMIT_WINDOWS.pop(stored_key, None)
+            while len(_GEMINI_RATE_LIMIT_WINDOWS) > 5000:
+                _GEMINI_RATE_LIMIT_WINDOWS.pop(next(iter(_GEMINI_RATE_LIMIT_WINDOWS)))
+    return None
+
+
+def gemini_rate_limit_response():
+    retry_after = consume_gemini_request()
+    if retry_after is None:
+        return None
+    response = jsonify({
+        "error": "Too many Gemini requests. Please wait before trying again."
+    })
+    response.status_code = 429
+    response.headers["Retry-After"] = str(retry_after)
+    return response
 
 AI_TASKS = {
     "resume_feedback": (
@@ -105,7 +185,7 @@ def public_config():
 
 @app.errorhandler(413)
 def request_too_large(_error):
-    return jsonify({"error": "The PDF must be 5 MB or smaller."}), 413
+    return jsonify({"error": "The request exceeds the maximum allowed upload size."}), 413
 
 
 def verify_supabase_user():
@@ -134,7 +214,7 @@ def verify_supabase_user():
         app.logger.warning("Supabase authentication returned HTTP %s", error.code)
         return None, (jsonify({"error": "Authentication service is temporarily unavailable."}), 502)
     except (URLError, TimeoutError):
-        app.logger.exception("Could not reach Supabase to verify the user session")
+        app.logger.error("Could not reach Supabase to verify the user session.")
         return None, (jsonify({"error": "Could not reach the authentication service. Check your connection."}), 503)
 
 
@@ -162,10 +242,10 @@ def verify_supabase_job_seeker():
             return jsonify({"error": "Your session has expired. Please sign in again."}), 401
         return jsonify({"error": "Could not verify access to this career tool."}), 502
     except (URLError, TimeoutError):
-        app.logger.exception("Could not reach Supabase to verify the account type")
+        app.logger.error("Could not reach Supabase to verify the account type.")
         return jsonify({"error": "Could not verify access to this career tool. Check your connection."}), 503
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        app.logger.exception("Supabase returned an unreadable account-type response")
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        app.logger.warning("Supabase returned an unreadable account-type response.")
         return jsonify({"error": "Could not verify access to this career tool."}), 502
 
     if is_job_seeker is not True:
@@ -174,6 +254,10 @@ def verify_supabase_job_seeker():
 
 
 def verify_supabase_job_provider():
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        return jsonify({"error": "Authentication service is not configured."}), 503
+    if not request.headers.get("Authorization", "").startswith("Bearer "):
+        return jsonify({"error": "Sign in to access this employer tool."}), 401
     role_request = Request(
         f"{SUPABASE_URL}/rest/v1/rpc/is_job_provider",
         data=b"{}",
@@ -193,10 +277,10 @@ def verify_supabase_job_provider():
             return jsonify({"error": "Your session has expired. Please sign in again."}), 401
         return jsonify({"error": "Could not verify access to this employer tool."}), 502
     except (URLError, TimeoutError):
-        app.logger.exception("Could not reach Supabase to verify the account type")
+        app.logger.error("Could not reach Supabase to verify the account type.")
         return jsonify({"error": "Could not verify access to this employer tool. Check your connection."}), 503
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        app.logger.exception("Supabase returned an unreadable provider-role response")
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        app.logger.warning("Supabase returned an unreadable provider-role response.")
         return jsonify({"error": "Could not verify access to this employer tool."}), 502
 
     if is_job_provider is not True:
@@ -236,18 +320,16 @@ def supabase_rest_request(path, method="GET", payload=None):
             error_payload = {}
         if error.code >= 500:
             app.logger.warning(
-                "Supabase REST returned HTTP %s for %s: code=%s message=%s",
+                "Supabase REST request returned HTTP %s, code=%s",
                 error.code,
-                path,
                 error_payload.get("code") if isinstance(error_payload, dict) else None,
-                error_payload.get("message") if isinstance(error_payload, dict) else None,
             )
         return error.code, error_payload
     except (URLError, TimeoutError):
-        app.logger.exception("Could not reach Supabase for an authenticated request")
+        app.logger.error("Could not reach Supabase for an authenticated request.")
         return 503, {"code": "SERVICE_UNAVAILABLE"}
     except (json.JSONDecodeError, UnicodeDecodeError):
-        app.logger.exception("Supabase returned an unreadable authenticated response")
+        app.logger.warning("Supabase returned an unreadable authenticated response.")
         return 502, {"code": "INVALID_RESPONSE"}
 
 
@@ -277,12 +359,20 @@ def send_notification_email(recipient, subject, body):
         with urlopen(email_request, timeout=8):
             return True
     except (HTTPError, URLError, TimeoutError):
-        app.logger.warning("Could not deliver notification email to %s", recipient)
+        app.logger.warning("Could not deliver notification email.")
         return False
 
 
 def ics_escape(value):
-    return str(value or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+    return (
+        str(value or "")
+        .replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "\\n")
+    )
 
 
 def interview_ics(application, interview_at):
@@ -334,6 +424,27 @@ def validate_learning_id(value, field_name):
         return str(uuid.UUID(value))
     except (ValueError, TypeError, AttributeError):
         raise ValueError(f"{field_name} must be a valid identifier.") from None
+
+
+def saved_jobs_proxy_response(status, payload, empty_message):
+    if 200 <= status < 300:
+        return jsonify(payload if payload is not None else [])
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if isinstance(code, str) and code in {"42P01", "PGRST205"}:
+        return jsonify({
+            "error": (
+                "Saved jobs are not set up yet. Ask the project administrator "
+                "to run backend/migrations/phase18_saved_jobs.sql."
+            )
+        }), 503
+    if code == "23505":
+        return jsonify({"error": "This job is already saved."}), 409
+    if status in (400, 404):
+        return jsonify({"error": empty_message}), status
+    if status in (401, 403):
+        return jsonify({"error": "Your session cannot access saved jobs."}), status
+    app.logger.warning("Supabase saved-jobs request failed with HTTP %s", status)
+    return jsonify({"error": "The saved-jobs service is temporarily unavailable."}), 502
 
 
 PROJECT_FIELDS = {
@@ -452,6 +563,72 @@ def portfolio_proxy_response(status, payload):
     }), 502
 
 
+STAR_STORY_FIELDS = {"title", "situation", "task", "action", "result", "skill_tags"}
+STAR_STORY_TEXT_LIMITS = {
+    "title": (1, 120, "Story title"),
+    "situation": (1, 1200, "Situation"),
+    "task": (1, 1200, "Task"),
+    "action": (1, 1600, "Action"),
+    "result": (1, 1200, "Result"),
+}
+STAR_STORY_TOTAL_TEXT_LIMIT = 1700
+STAR_STORY_MAX_SKILL_TAGS = 12
+
+
+def validate_star_story_payload(payload):
+    if not isinstance(payload, dict) or set(payload) != STAR_STORY_FIELDS:
+        raise ValueError("Provide all STAR story fields.")
+
+    values = {}
+    for field, (minimum, maximum, label) in STAR_STORY_TEXT_LIMITS.items():
+        value = payload[field]
+        if not isinstance(value, str):
+            raise ValueError(f"{label} must be text.")
+        value = value.strip()
+        if not minimum <= len(value) <= maximum:
+            raise ValueError(f"{label} must be between {minimum} and {maximum} characters.")
+        values[field] = value
+    if sum(len(values[field]) for field in STAR_STORY_TEXT_LIMITS) > STAR_STORY_TOTAL_TEXT_LIMIT:
+        raise ValueError(
+            "Keep the complete STAR story to 1,700 characters or fewer so it fits in interview notes."
+        )
+
+    skill_tags = payload["skill_tags"]
+    if not isinstance(skill_tags, list) or len(skill_tags) > STAR_STORY_MAX_SKILL_TAGS:
+        raise ValueError("Enter no more than 12 skill tags.")
+    normalized_tags = []
+    seen_tags = set()
+    for skill in skill_tags:
+        if not isinstance(skill, str) or not 1 <= len(skill.strip()) <= 50:
+            raise ValueError("Each skill tag must be 1 to 50 characters.")
+        skill = skill.strip()
+        key = skill.casefold()
+        if key not in seen_tags:
+            seen_tags.add(key)
+            normalized_tags.append(skill)
+    values["skill_tags"] = normalized_tags
+    return values
+
+
+def star_story_proxy_response(status, payload, empty_message="That STAR story was not found."):
+    if 200 <= status < 300:
+        return jsonify(payload if payload is not None else [])
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if isinstance(code, str) and code in {"42P01", "PGRST200", "PGRST204", "PGRST205"}:
+        return jsonify({
+            "error": (
+                "The STAR story bank is not set up yet. Ask the project administrator "
+                "to run backend/migrations/phase25_star_story_bank.sql in the Supabase SQL Editor."
+            )
+        }), 503
+    if status in (400, 404):
+        return jsonify({"error": empty_message}), status
+    if status in (401, 403):
+        return jsonify({"error": "Your session cannot access these STAR stories."}), status
+    app.logger.warning("Supabase STAR story request failed with HTTP %s", status)
+    return jsonify({"error": "The STAR story bank is temporarily unavailable. Please try again."}), 502
+
+
 def validate_learning_payload(payload, allow_resource_id=False):
     if not isinstance(payload, dict):
         raise ValueError("Send learning-plan details as a JSON object.")
@@ -527,6 +704,57 @@ def extract_resume_text(pdf_bytes):
     return resume_text
 
 
+def calculate_first_response_time_hours(events):
+    events_by_application = {}
+    provider_response_statuses = {
+        "CV review", "Shortlisted", "Interview", "Offer", "Hired", "Rejected",
+    }
+    for event in events:
+        application_id = event.get("application_id")
+        if isinstance(application_id, str):
+            events_by_application.setdefault(application_id, []).append(event)
+
+    elapsed_hours = []
+    for application_events in events_by_application.values():
+        ordered_events = sorted(
+            application_events,
+            key=lambda event: datetime.fromisoformat(
+                event["changed_at"].replace("Z", "+00:00")
+            ),
+        )
+        submitted_at = next(
+            (
+                datetime.fromisoformat(event["changed_at"].replace("Z", "+00:00"))
+                for event in ordered_events
+                if event.get("from_status") is None
+                and event.get("to_status") == "Submitted"
+            ),
+            None,
+        )
+        if submitted_at is None:
+            continue
+        first_response_at = next(
+            (
+                datetime.fromisoformat(event["changed_at"].replace("Z", "+00:00"))
+                for event in ordered_events
+                if event.get("from_status") == "Submitted"
+                and event.get("to_status") in provider_response_statuses
+            ),
+            None,
+        )
+        if first_response_at is None:
+            continue
+        elapsed = (first_response_at - submitted_at).total_seconds()
+        if elapsed >= 0:
+            elapsed_hours.append(elapsed / 3600)
+
+    return {
+        "average_hours": round(sum(elapsed_hours) / len(elapsed_hours), 1)
+        if elapsed_hours else None,
+        "measured_applications": len(elapsed_hours),
+    }
+
+
 @app.route("/api/skill-gap", methods=["POST"])
 def skill_gap():
     error_response = verify_supabase_job_seeker()
@@ -552,6 +780,8 @@ def skill_gap():
     resume_file = request.files.get("resume")
     if resume_file and resume_file.filename:
         if not resume_file.filename.lower().endswith(".pdf"):
+            return jsonify({"error": "Only PDF résumés are supported."}), 400
+        if resume_file.mimetype not in {"application/pdf", "application/octet-stream"}:
             return jsonify({"error": "Only PDF résumés are supported."}), 400
         pdf_bytes = resume_file.read(MAX_FILE_SIZE + 1)
         if len(pdf_bytes) > MAX_FILE_SIZE:
@@ -611,11 +841,88 @@ def job_recommendation_proxy_error(status, payload):
     }), 502
 
 
+RESPONSE_METRIC_FIELDS = {
+    "response_rate",
+    "median_first_response_days",
+    "sample_size",
+    "sufficient_data",
+}
+
+
+def validate_response_metric_record(record, include_job_id=False):
+    expected_fields = RESPONSE_METRIC_FIELDS | ({"job_id"} if include_job_id else set())
+    if not isinstance(record, dict) or set(record) != expected_fields:
+        raise ValueError("The response metrics were invalid.")
+
+    sample_size = record["sample_size"]
+    sufficient_data = record["sufficient_data"]
+    if (
+        isinstance(sample_size, bool)
+        or not isinstance(sample_size, int)
+        or sample_size < 0
+        or not isinstance(sufficient_data, bool)
+        or sufficient_data != (sample_size >= 5)
+    ):
+        raise ValueError("The response metrics were invalid.")
+
+    response_rate = record["response_rate"]
+    if response_rate is not None and (
+        isinstance(response_rate, bool)
+        or not isinstance(response_rate, (int, float))
+        or not isfinite(response_rate)
+        or not 0 <= response_rate <= 100
+    ):
+        raise ValueError("The response metrics were invalid.")
+    median_days = record["median_first_response_days"]
+    if median_days is not None and (
+        isinstance(median_days, bool)
+        or not isinstance(median_days, (int, float))
+        or not isfinite(median_days)
+        or median_days < 0
+    ):
+        raise ValueError("The response metrics were invalid.")
+    if (
+        (not sufficient_data and (response_rate is not None or median_days is not None))
+        or (sufficient_data and response_rate is None)
+    ):
+        raise ValueError("The response metrics were invalid.")
+
+    metrics = {
+        "response_rate": response_rate,
+        "median_first_response_days": median_days,
+        "sample_size": sample_size,
+        "sufficient_data": sufficient_data,
+    }
+    if include_job_id:
+        try:
+            metrics["job_id"] = str(uuid.UUID(record["job_id"]))
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("The response metrics were invalid.") from None
+    return metrics
+
+
+def response_metrics_proxy_error(status, payload):
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if code in {"42P01", "42883", "PGRST202", "PGRST204", "PGRST205"}:
+        return jsonify({
+            "error": (
+                "Employer response metrics are not set up yet. Run "
+                "backend/migrations/phase19_application_status_history.sql "
+                "and backend/migrations/phase26_employer_response_transparency.sql "
+                "in the Supabase SQL Editor."
+            )
+        }), 503
+    if status in (401, 403):
+        return jsonify({"error": "Your session cannot access these response metrics."}), status
+    app.logger.warning("Supabase response-metrics request failed with HTTP %s", status)
+    return jsonify({"error": "Employer response metrics are temporarily unavailable."}), 502
+
+
 def fetch_portfolio_projects():
     path = (
         "career_projects?select=id,title,description,skills,contribution,"
         "project_url,started_on,completed_on,created_at,updated_at"
-        "&order=updated_at.desc"
+        "&order=updated_at.desc&limit=100"
     )
     status, payload = supabase_rest_request(path)
     if 200 <= status < 300:
@@ -657,7 +964,7 @@ def job_recommendations():
     jobs_status, jobs = supabase_rest_request(
         "job_listings?select=id,provider_id,title,company,location,"
         "workplace_type,employment_type,description,requirements,status,created_at"
-        "&status=eq.published&order=created_at.desc"
+        "&status=eq.published&order=created_at.desc&limit=500"
     )
     if not 200 <= jobs_status < 300:
         return job_recommendation_proxy_error(jobs_status, jobs)
@@ -667,7 +974,7 @@ def job_recommendations():
 
     learning_status, learning_records = supabase_rest_request(
         "user_learning_plans?select=status,"
-        "resource:learning_resources(title,skill_tags)&order=updated_at.desc"
+        "resource:learning_resources(title,skill_tags)&order=updated_at.desc&limit=500"
     )
     learning_records_available = 200 <= learning_status < 300
     if learning_records_available:
@@ -694,6 +1001,163 @@ def job_recommendations():
     ))
 
 
+@app.route(
+    "/api/job-recommendations/<string:job_id>/what-if",
+    methods=["POST"],
+)
+def job_recommendation_what_if(job_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    try:
+        job_id = validate_learning_id(job_id, "Job listing ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) - {"add_skills", "remove_skills"}:
+        return jsonify({"error": "Send only hypothetical skills to add or remove."}), 400
+
+    def normalize_changes(value, field_name):
+        if not isinstance(value, list) or len(value) > 20:
+            raise ValueError(f"{field_name} must contain at most 20 recognized skills.")
+        normalized = []
+        for skill in value:
+            if not isinstance(skill, str) or not 2 <= len(skill.strip()) <= 60:
+                raise ValueError(f"Each {field_name.lower()} entry must be 2 to 60 characters.")
+            canonical = normalize_skill_name(skill)
+            if not canonical:
+                raise ValueError(f"Choose recognized skills for {field_name.lower()}.")
+            if canonical in normalized:
+                raise ValueError(f"Do not repeat skills in {field_name.lower()}.")
+            normalized.append(canonical)
+        return normalized
+
+    try:
+        add_skills = normalize_changes(payload.get("add_skills", []), "Added skills")
+        remove_skills = normalize_changes(
+            payload.get("remove_skills", []), "Removed skills"
+        )
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    if set(add_skills) & set(remove_skills):
+        return jsonify({"error": "A skill cannot be both added and removed."}), 400
+    if not add_skills and not remove_skills:
+        return jsonify({"error": "Add or remove at least one skill to run a simulation."}), 400
+
+    jobs_status, jobs = supabase_rest_request(
+        "job_listings?select=id,title,company,description,requirements"
+        f"&id=eq.{job_id}&status=eq.published&limit=1"
+    )
+    if jobs_status in (401, 403):
+        return jsonify({"error": "Your session cannot access this job listing."}), jobs_status
+    if not 200 <= jobs_status < 300:
+        return jsonify({"error": "Could not load this job listing."}), 502
+    if not isinstance(jobs, list) or not jobs:
+        return jsonify({"error": "Published job listing not found."}), 404
+    if not isinstance(jobs[0], dict):
+        app.logger.warning("Supabase returned an invalid what-if job listing.")
+        return jsonify({"error": "The job listing response was invalid."}), 502
+
+    profile_status, profiles = supabase_rest_request(
+        "career_profiles?select=target_role,headline,about,skills&limit=1"
+    )
+    if not 200 <= profile_status < 300:
+        return job_recommendation_proxy_error(profile_status, profiles)
+    if not isinstance(profiles, list) or len(profiles) > 1:
+        app.logger.warning("Supabase returned an invalid what-if profile response.")
+        return jsonify({"error": "The saved profile response was invalid."}), 502
+    profile = profiles[0] if profiles else {}
+    project_records, portfolio_available, project_error = fetch_portfolio_projects()
+    if project_error:
+        return project_error
+    profile["project_evidence"] = project_records
+    profile["portfolio_evidence_available"] = portfolio_available
+
+    learning_status, learning_records = supabase_rest_request(
+        "user_learning_plans?select=status,"
+        "resource:learning_resources(title,skill_tags)&order=updated_at.desc&limit=500"
+    )
+    learning_records_available = 200 <= learning_status < 300
+    if learning_records_available:
+        if not isinstance(learning_records, list):
+            app.logger.warning("Supabase returned invalid what-if learning records.")
+            return jsonify({"error": "The learning-plan response was invalid."}), 502
+    elif (
+        isinstance(learning_records, dict)
+        and learning_records.get("code")
+        in {"42P01", "PGRST200", "PGRST204", "PGRST205"}
+    ):
+        learning_records = []
+    else:
+        return job_recommendation_proxy_error(learning_status, learning_records)
+
+    result = build_job_what_if(
+        jobs[0],
+        profile,
+        add_skills,
+        remove_skills,
+        learning_records,
+        learning_records_available,
+    )
+    result["note"] = (
+        "This simulation assumes the selected skills are listed in the profile. "
+        "It does not verify proficiency, save profile changes, or predict hiring."
+    )
+    return jsonify(result)
+
+
+@app.route("/api/saved-jobs")
+def saved_jobs():
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    status, payload = supabase_rest_request(
+        "saved_jobs?select=job_id,created_at&order=created_at.desc&limit=500"
+    )
+    return saved_jobs_proxy_response(status, payload, "Could not load saved jobs.")
+
+
+@app.route("/api/saved-jobs", methods=["POST"])
+def save_job():
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    if not request.is_json:
+        return jsonify({"error": "Send a job ID as JSON."}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) != {"job_id"}:
+        return jsonify({"error": "Provide exactly one job ID."}), 400
+    try:
+        job_id = validate_learning_id(payload["job_id"], "Job ID")
+    except (BadRequest, ValueError) as error:
+        return jsonify({"error": str(error) or "The saved job is invalid."}), 400
+
+    status, result = supabase_rest_request(
+        "saved_jobs",
+        method="POST",
+        payload={"job_id": job_id},
+    )
+    return saved_jobs_proxy_response(status, result, "The selected job is unavailable.")
+
+
+@app.route("/api/saved-jobs/<string:job_id>", methods=["DELETE"])
+def remove_saved_job(job_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    try:
+        job_id = validate_learning_id(job_id, "Job ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    status, result = supabase_rest_request(
+        f"saved_jobs?job_id=eq.{job_id}",
+        method="DELETE",
+    )
+    if status == 200 and not result:
+        return jsonify({"error": "That saved job was not found."}), 404
+    return saved_jobs_proxy_response(status, result, "Could not remove the saved job.")
+
+
 @app.route("/api/learning/resources")
 def learning_resources():
     error_response = verify_supabase_job_seeker()
@@ -704,7 +1168,7 @@ def learning_resources():
         "learning_resources?select=id,title,description,provider,resource_url,"
         "difficulty,resource_type,skill_tags,objectives,"
         "category:learning_categories(name,slug)"
-        "&is_active=eq.true&order=title.asc"
+        "&is_active=eq.true&order=title.asc&limit=1000"
     )
     status, payload = learning_supabase_request(path)
     return learning_proxy_response(
@@ -724,7 +1188,7 @@ def learning_plan():
         "resource:learning_resources(id,title,description,provider,"
         "resource_url,difficulty,resource_type,skill_tags,objectives,"
         "category:learning_categories(name,slug))"
-        "&order=updated_at.desc"
+        "&order=updated_at.desc&limit=500"
     )
     status, payload = learning_supabase_request(path)
     return learning_proxy_response(
@@ -805,6 +1269,74 @@ def delete_portfolio_project(project_id):
     return portfolio_proxy_response(status, payload)
 
 
+@app.route("/api/star-stories", methods=["GET"])
+def star_stories():
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+
+    status, payload = supabase_rest_request(
+        "star_stories?select=id,title,situation,task,action,result,skill_tags,created_at,updated_at"
+        "&order=updated_at.desc"
+    )
+    return star_story_proxy_response(status, payload, "Could not load your STAR stories.")
+
+
+@app.route("/api/star-stories", methods=["POST"])
+def create_star_story():
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    if not request.is_json:
+        return jsonify({"error": "Send STAR story details as JSON."}), 400
+    try:
+        values = validate_star_story_payload(request.get_json())
+    except (BadRequest, ValueError) as error:
+        return jsonify({"error": str(error) or "STAR story details are invalid."}), 400
+
+    status, payload = supabase_rest_request("star_stories", method="POST", payload=values)
+    return star_story_proxy_response(status, payload, "The STAR story could not be saved.")
+
+
+@app.route("/api/star-stories/<string:story_id>", methods=["PATCH"])
+def update_star_story(story_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    try:
+        story_id = validate_learning_id(story_id, "STAR story ID")
+        if not request.is_json:
+            raise ValueError("Send STAR story changes as JSON.")
+        values = validate_star_story_payload(request.get_json())
+    except (BadRequest, ValueError) as error:
+        return jsonify({"error": str(error) or "STAR story details are invalid."}), 400
+
+    status, payload = supabase_rest_request(
+        f"star_stories?id=eq.{story_id}", method="PATCH", payload=values
+    )
+    if 200 <= status < 300 and not payload:
+        return jsonify({"error": "That STAR story was not found."}), 404
+    return star_story_proxy_response(status, payload)
+
+
+@app.route("/api/star-stories/<string:story_id>", methods=["DELETE"])
+def delete_star_story(story_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    try:
+        story_id = validate_learning_id(story_id, "STAR story ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    status, payload = supabase_rest_request(
+        f"star_stories?id=eq.{story_id}", method="DELETE"
+    )
+    if 200 <= status < 300 and not payload:
+        return jsonify({"error": "That STAR story was not found."}), 404
+    return star_story_proxy_response(status, payload)
+
+
 @app.route("/api/learning/recommendations", methods=["POST"])
 def learning_recommendations():
     error_response = verify_supabase_job_seeker()
@@ -837,7 +1369,7 @@ def learning_recommendations():
         "learning_resources?select=id,title,description,provider,resource_url,"
         "difficulty,resource_type,skill_tags,objectives,"
         "category:learning_categories(name,slug)"
-        "&is_active=eq.true&order=title.asc"
+        "&is_active=eq.true&order=title.asc&limit=1000"
     )
     status, resources = learning_supabase_request(path)
     if status < 200 or status >= 300:
@@ -919,7 +1451,7 @@ def remove_learning_plan_item(plan_id):
 
 @app.route("/api/interview-prep", methods=["POST"])
 def interview_prep():
-    _, error_response = verify_supabase_user()
+    error_response = verify_supabase_job_seeker()
     if error_response:
         return error_response
     if not request.is_json:
@@ -973,20 +1505,20 @@ def get_application_materials(job_id):
     return jsonify(payload[0] if isinstance(payload, list) and payload else None)
 
 
-@app.route("/api/provider-applicant-rankings")
-def provider_applicant_rankings():
+@app.route("/api/provider-applicant-evidence")
+def provider_applicant_evidence():
     error_response = verify_supabase_job_provider()
     if error_response:
         return error_response
 
     applications_status, applications = supabase_rest_request(
         "job_applications?select=id,job_id,applicant_id,created_at"
-        "&order=created_at.desc"
+        "&order=created_at.desc&limit=500"
     )
     if not 200 <= applications_status < 300:
-        return jsonify({"error": "Could not load applicant rankings."}), 502
+        return jsonify({"error": "Could not load applicant evidence."}), 502
     if not isinstance(applications, list) or not applications:
-        return jsonify({"rankings": []})
+        return jsonify({"evidence": []})
 
     applicant_ids = sorted({
         item.get("applicant_id")
@@ -999,20 +1531,20 @@ def provider_applicant_rankings():
         if isinstance(item, dict) and item.get("job_id")
     })
     if not applicant_ids or not job_ids:
-        return jsonify({"rankings": []})
+        return jsonify({"evidence": []})
 
     profiles_status, profiles = supabase_rest_request(
         "career_profiles?select=user_id,target_role,headline,about,skills"
-        f"&user_id=in.({','.join(applicant_ids)})"
+        f"&user_id=in.({','.join(applicant_ids)})&limit=500"
     )
     projects_status, projects = supabase_rest_request(
         "career_projects?select=user_id,title,description,skills,contribution"
         f"&user_id=in.({','.join(applicant_ids)})"
-        "&order=updated_at.desc"
+        "&order=updated_at.desc&limit=1000"
     )
     jobs_status, jobs = supabase_rest_request(
         "job_listings?select=id,title,company,description,requirements"
-        f"&id=in.({','.join(job_ids)})"
+        f"&id=in.({','.join(job_ids)})&limit=500"
     )
     if not all(200 <= status < 300 for status in (profiles_status, projects_status, jobs_status)):
         return jsonify({
@@ -1021,6 +1553,12 @@ def provider_applicant_rankings():
                 "backend/migrations/phase16_provider_applicant_ranking.sql in Supabase."
             )
         }), 503
+    if not all(
+        isinstance(records, list)
+        for records in (profiles, projects, jobs)
+    ):
+        app.logger.warning("Supabase returned malformed applicant evidence records.")
+        return jsonify({"error": "The applicant evidence response was invalid."}), 502
 
     profiles_by_id = {
         item["user_id"]: item for item in profiles
@@ -1035,7 +1573,7 @@ def provider_applicant_rankings():
         if isinstance(item, dict) and item.get("id")
     }
 
-    rankings = []
+    evidence_items = []
     for application in applications:
         if not isinstance(application, dict):
             continue
@@ -1048,18 +1586,332 @@ def provider_applicant_rankings():
         )
         match_result = build_job_recommendations([job], profile)
         match = match_result["jobs"][0]["match"] if match_result["jobs"] else None
-        rankings.append({
+        evidence_items.append({
             "application_id": application.get("id"),
             "job_id": application.get("job_id"),
             "score": match["score"] if match else None,
             "match": match,
         })
 
-    rankings.sort(
-        key=lambda item: item["score"] if item["score"] is not None else -1,
-        reverse=True,
+    return jsonify({"evidence": evidence_items})
+
+
+@app.route("/api/provider/job-listings/<string:job_id>/duplicate", methods=["POST"])
+def duplicate_provider_job_listing(job_id):
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    try:
+        job_id = validate_learning_id(job_id, "Job listing ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    fields = "title,company,location,workplace_type,employment_type,description,requirements"
+    status, listings = supabase_rest_request(
+        f"job_listings?select={fields}&id=eq.{job_id}"
     )
-    return jsonify({"rankings": rankings})
+    if not 200 <= status < 300:
+        return jsonify({"error": "Could not load this listing to duplicate."}), 502
+    if not isinstance(listings, list) or not listings:
+        return jsonify({"error": "That job listing was not found."}), 404
+
+    payload = dict(listings[0])
+    payload["title"] = f"{payload['title']} (copy)"[:120]
+    payload["status"] = "draft"
+    create_status, created = supabase_rest_request(
+        "job_listings", method="POST", payload=payload
+    )
+    if not 200 <= create_status < 300 or not isinstance(created, list) or not created:
+        return jsonify({"error": "Could not duplicate this job listing."}), 502
+    return jsonify({"job": created[0]}), 201
+
+
+@app.route("/api/provider/job-listings/<string:job_id>/status", methods=["PATCH"])
+def update_provider_job_listing_status(job_id):
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    try:
+        job_id = validate_learning_id(job_id, "Job listing ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    payload = request.get_json(silent=True)
+    status = payload.get("status") if isinstance(payload, dict) else None
+    if status not in {"draft", "published", "closed"}:
+        return jsonify({"error": "Choose a valid listing status."}), 400
+
+    update_status, updated = supabase_rest_request(
+        f"job_listings?id=eq.{job_id}",
+        method="PATCH",
+        payload={"status": status},
+    )
+    if update_status in (401, 403):
+        return jsonify({"error": "You cannot update this job listing."}), update_status
+    if not 200 <= update_status < 300 or not isinstance(updated, list) or not updated:
+        return jsonify({"error": "Could not update this job listing."}), 502
+    return jsonify({"job": updated[0]})
+
+
+@app.route("/api/provider/application-reviews")
+def provider_application_reviews():
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    status, reviews = supabase_rest_request(
+        "application_reviews?select=application_id,reviewer_notes,interview_at"
+        "&order=updated_at.desc&limit=500"
+    )
+    if not 200 <= status < 300 or not isinstance(reviews, list):
+        return jsonify({"error": "Could not load private applicant reviews."}), 502
+    return jsonify(reviews)
+
+
+def parse_interview_slot_start(value):
+    if not isinstance(value, str) or len(value) > 40:
+        raise ValueError("Provide a valid future interview time.")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("Provide a valid future interview time.") from error
+    if parsed.tzinfo is None:
+        raise ValueError("Include a timezone with the interview time.")
+    starts_at = parsed.astimezone(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if not now + timedelta(minutes=5) <= starts_at <= now + timedelta(days=365):
+        raise ValueError("Interview times must be at least five minutes and at most one year ahead.")
+    return starts_at.isoformat()
+
+
+def interview_slot_error_response(status, payload, default_message):
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if code == "PGRST202":
+        return jsonify({
+            "error": (
+                "Interview booking is not set up yet. Run "
+                "backend/migrations/phase24_interview_slot_booking.sql in Supabase."
+            )
+        }), 503
+    if code in {"23505", "22023", "23514", "P0002", "PGRST116"}:
+        return jsonify({"error": "That interview time is no longer available. Refresh and try another time."}), 409
+    if status in (401, 403) or code == "42501":
+        return jsonify({"error": "This interview slot is unavailable to your account."}), 404
+    app.logger.warning(
+        "Supabase interview slot request failed with HTTP %s, code=%s",
+        status,
+        code,
+    )
+    return jsonify({"error": default_message}), 502
+
+
+@app.route("/api/provider/interview-slots")
+def provider_interview_slots():
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    status, slots = supabase_rest_request(
+        "application_interview_slots?select=id,application_id,starts_at,status,booked_at"
+        "&order=starts_at.asc&limit=500"
+    )
+    if status in (400, 404) and isinstance(slots, dict) and slots.get("code") in {
+        "42P01", "PGRST204", "PGRST205"
+    }:
+        return jsonify({
+            "error": (
+                "Interview booking is not set up yet. Run "
+                "backend/migrations/phase24_interview_slot_booking.sql in Supabase."
+            )
+        }), 503
+    if not 200 <= status < 300 or not isinstance(slots, list):
+        return jsonify({"error": "Could not load interview slots."}), 502
+    return jsonify({"slots": slots})
+
+
+@app.route(
+    "/api/provider/job-applications/<string:application_id>/interview-slots",
+    methods=["POST"],
+)
+def create_provider_interview_slot(application_id):
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    try:
+        application_id = validate_learning_id(application_id, "Application ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) != {"starts_at"}:
+        return jsonify({"error": "Send only the interview start time."}), 400
+    try:
+        starts_at = parse_interview_slot_start(payload["starts_at"])
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    status, slots = supabase_rest_request(
+        "application_interview_slots",
+        method="POST",
+        payload={"application_id": application_id, "starts_at": starts_at},
+    )
+    slot_error_code = slots.get("code") if isinstance(slots, dict) else None
+    if status in (400, 404) and slot_error_code in {"42P01", "PGRST204", "PGRST205"}:
+        return jsonify({
+            "error": (
+                "Interview booking is not set up yet. Run "
+                "backend/migrations/phase24_interview_slot_booking.sql in Supabase."
+            )
+        }), 503
+    if status in (401, 403) or slot_error_code == "42501":
+        return jsonify({"error": "This application is not available for interview scheduling."}), 404
+    if status == 409 or slot_error_code in {"23505", "23514", "22023"}:
+        return jsonify({
+            "error": (
+                "This interview time conflicts with another appointment or is "
+                "outside the allowed scheduling window."
+            )
+        }), 409
+    if not 200 <= status < 300 or not isinstance(slots, list) or not slots:
+        return jsonify({"error": "Could not create this interview slot."}), 502
+    return jsonify({"slot": slots[0]}), 201
+
+
+@app.route("/api/provider/interview-slots/<string:slot_id>", methods=["DELETE"])
+def delete_provider_interview_slot(slot_id):
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    try:
+        slot_id = validate_learning_id(slot_id, "Interview slot ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    status, slots = supabase_rest_request(
+        f"application_interview_slots?id=eq.{slot_id}&status=eq.available",
+        method="DELETE",
+    )
+    if status in (401, 403) or (200 <= status < 300 and not slots):
+        return jsonify({"error": "Available interview slot not found."}), 404
+    if not 200 <= status < 300 or not isinstance(slots, list):
+        return jsonify({"error": "Could not remove this interview slot."}), 502
+    return jsonify({"deleted": True})
+
+
+@app.route("/api/provider/interview-slots/<string:slot_id>/cancel", methods=["POST"])
+def cancel_provider_interview_slot(slot_id):
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    try:
+        slot_id = validate_learning_id(slot_id, "Interview slot ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    status, result = supabase_rest_request(
+        "rpc/cancel_provider_interview_slot",
+        method="POST",
+        payload={"_slot_id": slot_id},
+    )
+    if not 200 <= status < 300:
+        return interview_slot_error_response(
+            status, result, "Could not cancel this interview slot."
+        )
+    return jsonify({"slot": result})
+
+
+@app.route("/api/provider/application-rejection-feedback")
+def provider_application_rejection_feedback():
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    status, feedback = supabase_rest_request(
+        "application_rejection_feedback?select=application_id,rejection_reason,"
+        "rejection_note,rejection_note_shared,rejected_at,updated_at"
+        "&order=updated_at.desc&limit=500"
+    )
+    if not 200 <= status < 300:
+        app.logger.warning(
+            "Provider rejection-feedback lookup failed with HTTP %s", status
+        )
+        return jsonify({
+            "error": (
+                "Structured rejection feedback is unavailable. Run "
+                "backend/migrations/phase20_rejection_feedback.sql and "
+                "backend/migrations/phase27_structured_rejection_feedback.sql "
+                "in Supabase."
+            )
+        }), 503
+    if not isinstance(feedback, list) or not all(
+        isinstance(item, dict) for item in feedback
+    ):
+        app.logger.warning("Supabase returned invalid provider rejection feedback.")
+        return jsonify({"error": "The feedback response was invalid."}), 502
+    return jsonify({"feedback": feedback})
+
+
+def save_application_stage(
+    application_id,
+    status,
+    rejection_reason=None,
+    rejection_note=None,
+    rejection_note_shared=False,
+):
+    application_status, applications = supabase_rest_request(
+        "job_applications?select=id,job_title,company,applicant_email"
+        f"&id=eq.{application_id}&limit=1"
+    )
+    if application_status in (401, 403):
+        return jsonify({"error": "This application is unavailable to your account."}), 404
+    if not 200 <= application_status < 300:
+        app.logger.warning(
+            "Provider application lookup failed with HTTP %s", application_status
+        )
+        return jsonify({"error": "Could not load this application."}), 502
+    if not isinstance(applications, list) or not applications:
+        return jsonify({"error": "This application is unavailable to your account."}), 404
+    application = applications[0]
+    if not isinstance(application, dict):
+        app.logger.warning("Supabase returned an invalid provider application.")
+        return jsonify({"error": "The application response was invalid."}), 502
+
+    update_status, result = supabase_rest_request(
+        "rpc/update_job_application_status_with_rejection",
+        method="POST",
+        payload={
+            "_application_id": application_id,
+            "_status": status,
+            "_rejection_reason": rejection_reason,
+            "_rejection_note": rejection_note,
+            "_rejection_note_shared": rejection_note_shared,
+        },
+    )
+    if not 200 <= update_status < 300:
+        code = result.get("code") if isinstance(result, dict) else None
+        if code == "42501" or update_status in (401, 403):
+            return jsonify({"error": "This application is unavailable to your account."}), 404
+        if code in {"PGRST202", "PGRST204", "PGRST205", "42P01"}:
+            return jsonify({
+                "error": (
+                    "Structured rejection feedback is not set up yet. Run "
+                    "backend/migrations/phase27_structured_rejection_feedback.sql "
+                    "in Supabase."
+                )
+            }), 503
+        if code == "22023":
+            return jsonify({"error": "Provide valid rejection details."}), 400
+        app.logger.warning(
+            "Provider application status update failed with HTTP %s, code=%s",
+            update_status,
+            code,
+        )
+        return jsonify({"error": "Could not update the applicant status."}), 502
+    if not isinstance(result, dict):
+        app.logger.warning("Supabase returned an invalid application status result.")
+        return jsonify({"error": "The application response was invalid."}), 502
+
+    if status in {"Shortlisted", "Interview", "Rejected"}:
+        send_notification_email(
+            application.get("applicant_email"),
+            f"CareerLens application update: {status}",
+            f"Your application for {application.get('job_title', 'this role')} at "
+            f"{application.get('company', 'the company')} is now {status}.",
+        )
+    return jsonify({"application": result})
 
 
 @app.route("/api/provider/job-applications/<string:application_id>/status", methods=["PATCH"])
@@ -1072,26 +1924,45 @@ def update_provider_application_status(application_id):
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
     payload = request.get_json(silent=True)
-    status = payload.get("status") if isinstance(payload, dict) else None
-    allowed_statuses = {"Submitted", "CV review", "Shortlisted", "Interview", "Offer", "Hired", "Rejected"}
-    if status not in allowed_statuses:
+    allowed_statuses = {
+        "Submitted", "CV review", "Shortlisted", "Interview", "Offer", "Hired", "Rejected"
+    }
+    allowed_payload_keys = {
+        "status", "rejection_reason", "rejection_note", "rejection_note_shared"
+    }
+    if not isinstance(payload, dict) or set(payload) - allowed_payload_keys:
+        return jsonify({"error": "Send a valid application stage as JSON."}), 400
+    status = payload.get("status")
+    if not isinstance(status, str) or status not in allowed_statuses:
         return jsonify({"error": "Choose a valid hiring stage."}), 400
-    update_status, updated = supabase_rest_request(
-        f"job_applications?id=eq.{application_id}",
-        method="PATCH",
-        payload={"status": status},
+    rejection_reason = None
+    rejection_note = None
+    rejection_note_shared = False
+    if status == "Rejected":
+        rejection_reason = payload.get("rejection_reason")
+        rejection_note = payload.get("rejection_note", "")
+        rejection_note_shared = payload.get("rejection_note_shared", False)
+        if not isinstance(rejection_reason, str) or rejection_reason not in REJECTION_FEEDBACK_CODES:
+            return jsonify({"error": "Choose one valid rejection reason."}), 400
+        if not isinstance(rejection_note, str) or len(rejection_note) > 500:
+            return jsonify({"error": "The rejection note must be 500 characters or fewer."}), 400
+        rejection_note = rejection_note.strip()
+        if not isinstance(rejection_note_shared, bool):
+            return jsonify({"error": "Choose whether to share the note with the applicant."}), 400
+    elif set(payload) & {
+        "rejection_reason", "rejection_note", "rejection_note_shared"
+    }:
+        return jsonify({
+            "error": "Rejection details can be sent only when the stage is Rejected."
+        }), 400
+
+    return save_application_stage(
+        application_id,
+        status,
+        rejection_reason,
+        rejection_note,
+        rejection_note_shared,
     )
-    if not 200 <= update_status < 300 or not isinstance(updated, list) or not updated:
-        return jsonify({"error": "Could not update the applicant status."}), 502
-    application = updated[0]
-    if status in {"Shortlisted", "Interview", "Rejected"}:
-        send_notification_email(
-            application.get("applicant_email"),
-            f"CareerLens application update: {status}",
-            f"Your application for {application.get('job_title', 'this role')} at "
-            f"{application.get('company', 'the company')} is now {status}.",
-        )
-    return jsonify({"application": application})
 
 
 @app.route("/api/provider/application-reviews/<string:application_id>", methods=["POST"])
@@ -1133,6 +2004,13 @@ def save_provider_application_review(application_id):
         method="PATCH",
         payload={"reviewer_notes": notes.strip(), "interview_at": interview_at},
     )
+    if update_status == 400 and isinstance(updated, dict) and updated.get("code") == "23514":
+        return jsonify({
+            "error": (
+                "Use the booked interview slot to manage its date, or remove "
+                "available slots before setting a manual interview date."
+            )
+        }), 409
     if not 200 <= update_status < 300:
         return jsonify({"error": "Could not save the interview details."}), 502
     if not updated:
@@ -1153,6 +2031,41 @@ def save_provider_application_review(application_id):
     return jsonify({"review": updated[0] if isinstance(updated, list) and updated else {}})
 
 
+@app.route(
+    "/api/provider/job-applications/<string:application_id>/rejection-feedback",
+    methods=["POST"],
+)
+def save_provider_rejection_feedback(application_id):
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+    try:
+        application_id = validate_learning_id(application_id, "Application ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    payload = request.get_json(silent=True)
+    allowed_keys = {"rejection_reason", "rejection_note", "rejection_note_shared"}
+    if not isinstance(payload, dict) or set(payload) - allowed_keys:
+        return jsonify({"error": "Send structured rejection details as JSON."}), 400
+    rejection_reason = payload.get("rejection_reason")
+    rejection_note = payload.get("rejection_note", "")
+    rejection_note_shared = payload.get("rejection_note_shared", False)
+    if not isinstance(rejection_reason, str) or rejection_reason not in REJECTION_FEEDBACK_CODES:
+        return jsonify({"error": "Choose one valid rejection reason."}), 400
+    if not isinstance(rejection_note, str) or len(rejection_note) > 500:
+        return jsonify({"error": "The rejection note must be 500 characters or fewer."}), 400
+    rejection_note = rejection_note.strip()
+    if not isinstance(rejection_note_shared, bool):
+        return jsonify({"error": "Choose whether to share the note with the applicant."}), 400
+    return save_application_stage(
+        application_id,
+        "Rejected",
+        rejection_reason,
+        rejection_note,
+        rejection_note_shared,
+    )
+
+
 @app.route("/api/notifications")
 def notifications():
     _, error_response = verify_supabase_user()
@@ -1164,14 +2077,29 @@ def notifications():
     )
     if not 200 <= status < 300:
         return jsonify({"error": "Notifications are not set up yet. Run backend/migrations/phase16_provider_applicant_ranking.sql in Supabase."}), 503
-    items = records if isinstance(records, list) else []
+    if not isinstance(records, list):
+        app.logger.warning("Supabase returned an invalid notifications response.")
+        return jsonify({"error": "The notifications response was invalid."}), 502
+    items = records
     today = date.today().isoformat()
     follow_status, follow_ups = supabase_rest_request(
         "applications?select=id,title,company,follow_up_on&follow_up_on=not.is.null"
-        f"&follow_up_on=lte.{today}&status=not.in.(Offer,Rejected)"
+        f"&follow_up_on=lte.{today}&status=not.in.(Offer,Rejected)&limit=100"
     )
-    if 200 <= follow_status < 300 and isinstance(follow_ups, list):
-        items.extend({
+    if not 200 <= follow_status < 300:
+        app.logger.warning(
+            "Supabase follow-up reminder request failed with HTTP %s",
+            follow_status,
+        )
+        return jsonify({"error": "Could not load follow-up reminders."}), 502
+    if not isinstance(follow_ups, list):
+        app.logger.warning("Supabase returned an invalid follow-up response.")
+        return jsonify({"error": "The follow-up response was invalid."}), 502
+    if not all(isinstance(item, dict) for item in items + follow_ups):
+        app.logger.warning("Supabase returned malformed notification records.")
+        return jsonify({"error": "The notifications response was invalid."}), 502
+    items.extend(
+        {
             "id": f"follow-up:{item.get('id')}:{item.get('follow_up_on')}",
             "notification_type": "follow_up",
             "title": "Follow-up reminder",
@@ -1179,9 +2107,82 @@ def notifications():
             "data": {"application_id": item.get("id")},
             "read_at": None,
             "created_at": f"{item.get('follow_up_on')}T00:00:00Z",
-        } for item in follow_ups)
+        }
+        for item in follow_ups
+    )
     items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
     return jsonify({"notifications": items[:50]})
+
+
+@app.route("/api/job-applications/interview-slots")
+def applicant_interview_slots():
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    status, slots = supabase_rest_request(
+        "application_interview_slots?select=id,application_id,starts_at,status,booked_at"
+        "&order=starts_at.asc&limit=500"
+    )
+    if status in (400, 404) and isinstance(slots, dict) and slots.get("code") in {
+        "42P01", "PGRST204", "PGRST205"
+    }:
+        return jsonify({
+            "error": (
+                "Interview booking is not set up yet. Run "
+                "backend/migrations/phase24_interview_slot_booking.sql in Supabase."
+            )
+        }), 503
+    if not 200 <= status < 300 or not isinstance(slots, list):
+        return jsonify({"error": "Could not load interview slots."}), 502
+    return jsonify({"slots": slots})
+
+
+@app.route(
+    "/api/job-applications/interview-slots/<string:slot_id>/book",
+    methods=["POST"],
+)
+def book_applicant_interview_slot(slot_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    try:
+        slot_id = validate_learning_id(slot_id, "Interview slot ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    status, result = supabase_rest_request(
+        "rpc/book_application_interview_slot",
+        method="POST",
+        payload={"_slot_id": slot_id},
+    )
+    if not 200 <= status < 300:
+        return interview_slot_error_response(
+            status, result, "Could not book this interview time."
+        )
+    return jsonify({"slot": result})
+
+
+@app.route(
+    "/api/job-applications/interview-slots/<string:slot_id>/cancel",
+    methods=["POST"],
+)
+def cancel_applicant_interview_slot(slot_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    try:
+        slot_id = validate_learning_id(slot_id, "Interview slot ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    status, result = supabase_rest_request(
+        "rpc/cancel_application_interview_slot",
+        method="POST",
+        payload={"_slot_id": slot_id},
+    )
+    if not 200 <= status < 300:
+        return interview_slot_error_response(
+            status, result, "Could not cancel this interview time."
+        )
+    return jsonify({"slot": result})
 
 
 @app.route("/api/notifications/<string:notification_id>/read", methods=["PATCH"])
@@ -1200,7 +2201,297 @@ def mark_notification_read(notification_id):
     )
     if not 200 <= status < 300:
         return jsonify({"error": "Could not mark this notification read."}), 502
-    return jsonify({"notification": records[0] if isinstance(records, list) and records else None})
+    if not isinstance(records, list) or not records:
+        return jsonify({"error": "Notification not found."}), 404
+    return jsonify({"notification": records[0]})
+
+
+@app.route("/api/jobs/responsiveness")
+def published_job_responsiveness():
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+
+    status, records = supabase_rest_request(
+        "rpc/get_job_responsiveness",
+        method="POST",
+        payload={"_job_id": None},
+    )
+    if not 200 <= status < 300:
+        return response_metrics_proxy_error(status, records)
+    if not isinstance(records, list) or len(records) > 500:
+        app.logger.warning("Supabase returned invalid published job response metrics.")
+        return jsonify({"error": "The response metrics were invalid."}), 502
+    try:
+        metrics = [
+            validate_response_metric_record(record, include_job_id=True)
+            for record in records
+        ]
+    except ValueError:
+        app.logger.warning("Supabase returned invalid published job response metrics.")
+        return jsonify({"error": "The response metrics were invalid."}), 502
+    return jsonify({"metrics": metrics})
+
+
+@app.route("/api/jobs/<string:job_id>/responsiveness")
+def job_responsiveness(job_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    try:
+        job_id = validate_learning_id(job_id, "Job ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    status, records = supabase_rest_request(
+        "rpc/get_job_responsiveness",
+        method="POST",
+        payload={"_job_id": job_id},
+    )
+    if not 200 <= status < 300:
+        return response_metrics_proxy_error(status, records)
+    if not isinstance(records, list) or len(records) > 1:
+        app.logger.warning("Supabase returned invalid job response metrics.")
+        return jsonify({"error": "The response metrics were invalid."}), 502
+    if not records:
+        return jsonify({"error": "Published job not found."}), 404
+    try:
+        metrics = validate_response_metric_record(records[0], include_job_id=True)
+    except ValueError:
+        app.logger.warning("Supabase returned invalid job response metrics.")
+        return jsonify({"error": "The response metrics were invalid."}), 502
+    if metrics["job_id"] != job_id:
+        app.logger.warning("Supabase returned response metrics for a different job.")
+        return jsonify({"error": "The response metrics were invalid."}), 502
+    return jsonify({
+        key: value for key, value in metrics.items() if key != "job_id"
+    })
+
+
+@app.route("/api/provider/response-metrics")
+def provider_response_metrics():
+    error_response = verify_supabase_job_provider()
+    if error_response:
+        return error_response
+
+    status, records = supabase_rest_request(
+        "rpc/get_provider_response_metrics",
+        method="POST",
+        payload={},
+    )
+    if not 200 <= status < 300:
+        return response_metrics_proxy_error(status, records)
+    if not isinstance(records, list) or len(records) != 1:
+        app.logger.warning("Supabase returned invalid provider response metrics.")
+        return jsonify({"error": "The response metrics were invalid."}), 502
+    try:
+        metrics = validate_response_metric_record(records[0])
+    except ValueError:
+        app.logger.warning("Supabase returned invalid provider response metrics.")
+        return jsonify({"error": "The response metrics were invalid."}), 502
+    return jsonify(metrics)
+
+
+@app.route("/api/application-analytics")
+def application_analytics():
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    status, events = supabase_rest_request(
+        "application_status_events?select=application_id,from_status,to_status,changed_at"
+        "&order=changed_at.asc&limit=1000"
+    )
+    if not 200 <= status < 300:
+        app.logger.warning(
+            "Application analytics history lookup failed with HTTP %s", status
+        )
+        return jsonify({
+            "error": (
+                "Application response-time analytics are unavailable. Run "
+                "backend/migrations/phase19_application_status_history.sql in Supabase."
+            )
+        }), 503
+    if not isinstance(events, list) or not all(isinstance(event, dict) for event in events):
+        app.logger.warning("Supabase returned invalid application analytics history.")
+        return jsonify({"error": "The application analytics response was invalid."}), 502
+    valid_statuses = {
+        "Submitted", "CV review", "Shortlisted", "Interview",
+        "Offer", "Hired", "Rejected", "Withdrawn",
+    }
+    for event in events:
+        if (
+            not isinstance(event.get("application_id"), str)
+            or event.get("to_status") not in valid_statuses
+            or (
+                event.get("from_status") is not None
+                and event.get("from_status") not in valid_statuses
+            )
+            or not isinstance(event.get("changed_at"), str)
+        ):
+            app.logger.warning("Supabase returned an invalid application analytics event.")
+            return jsonify({"error": "The application analytics response was invalid."}), 502
+        try:
+            datetime.fromisoformat(event["changed_at"].replace("Z", "+00:00"))
+        except ValueError:
+            app.logger.warning("Supabase returned an invalid analytics timestamp.")
+            return jsonify({"error": "The application analytics response was invalid."}), 502
+
+    truncated = len(events) >= 1000
+    measured = (
+        calculate_first_response_time_hours(events)
+        if not truncated
+        else {"average_hours": None, "measured_applications": 0}
+    )
+    return jsonify({
+        "average_first_response_hours": measured["average_hours"],
+        "measured_applications": measured["measured_applications"],
+        "complete": not truncated,
+        "calculation": (
+            "Mean elapsed time from a recorded Submitted event to the first "
+            "provider status change. Only complete CareerLens timelines are included; "
+            "manual tracker entries and applicant withdrawals are excluded."
+        ),
+    })
+
+
+@app.route("/api/job-applications/<string:application_id>/rejection-feedback")
+def applicant_rejection_feedback(application_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    try:
+        application_id = validate_learning_id(application_id, "Application ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    feedback_status, feedback = supabase_rest_request(
+        "rpc/get_applicant_rejection_feedback",
+        method="POST",
+        payload={"_application_id": application_id},
+    )
+    if feedback_status in (401, 403):
+        return jsonify({"error": "Application not found."}), 404
+    if not 200 <= feedback_status < 300:
+        code = feedback.get("code") if isinstance(feedback, dict) else None
+        if code in {"PGRST202", "PGRST204", "PGRST205", "42P01"}:
+            return jsonify({
+                "error": (
+                    "Structured rejection feedback is not set up yet. Run "
+                    "backend/migrations/phase27_structured_rejection_feedback.sql "
+                    "in Supabase."
+                )
+            }), 503
+        app.logger.warning(
+            "Applicant rejection-feedback lookup failed with HTTP %s, code=%s",
+            feedback_status,
+            code,
+        )
+        return jsonify({"error": "Could not load rejection details."}), 502
+    if not isinstance(feedback, list) or not all(
+        isinstance(item, dict) for item in feedback
+    ):
+        app.logger.warning("Supabase returned an invalid applicant rejection projection.")
+        return jsonify({"error": "The rejection details response was invalid."}), 502
+    if not feedback:
+        return jsonify({"error": "Application not found."}), 404
+    visible = feedback[0]
+    allowed_fields = {
+        "rejection_reason", "rejection_note", "rejected_at", "job_title",
+        "job_description", "job_requirements",
+    }
+    if set(visible) - allowed_fields or (
+        visible.get("rejection_reason") is not None
+        and visible.get("rejection_reason") not in REJECTION_FEEDBACK_CODES
+    ):
+        app.logger.warning("Supabase returned unexpected applicant rejection fields.")
+        return jsonify({"error": "The rejection details response was invalid."}), 502
+    if not isinstance(visible.get("rejection_note"), (str, type(None))) or (
+        isinstance(visible.get("rejection_note"), str)
+        and len(visible["rejection_note"]) > 500
+    ):
+        app.logger.warning("Supabase returned an invalid shared rejection note.")
+        return jsonify({"error": "The rejection details response was invalid."}), 502
+    return jsonify({"feedback": visible})
+
+
+@app.route("/api/job-applications/<string:application_id>/timeline")
+def application_status_timeline(application_id):
+    error_response = verify_supabase_job_seeker()
+    if error_response:
+        return error_response
+    try:
+        application_id = validate_learning_id(application_id, "Application ID")
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    application_status, applications = supabase_rest_request(
+        "job_applications?select=id,status,created_at"
+        f"&id=eq.{application_id}&limit=1"
+    )
+    if application_status in (401, 403):
+        return jsonify({"error": "Your session cannot access this application."}), application_status
+    if not 200 <= application_status < 300:
+        app.logger.warning(
+            "Application timeline lookup failed with HTTP %s", application_status
+        )
+        return jsonify({"error": "Could not load this application."}), 502
+    if not isinstance(applications, list) or not applications:
+        return jsonify({"error": "Application not found."}), 404
+    application = applications[0]
+    allowed_statuses = {
+        "Submitted", "CV review", "Shortlisted", "Interview",
+        "Offer", "Hired", "Rejected", "Withdrawn",
+    }
+    if (
+        not isinstance(application, dict)
+        or application.get("status") not in allowed_statuses
+        or not isinstance(application.get("created_at"), str)
+    ):
+        app.logger.warning("Supabase returned an invalid application timeline record.")
+        return jsonify({"error": "The application response was invalid."}), 502
+
+    events_status, events = supabase_rest_request(
+        "application_status_events?select=from_status,to_status,changed_at"
+        f"&application_id=eq.{application_id}&order=changed_at.desc&limit=500"
+    )
+    if not 200 <= events_status < 300:
+        app.logger.warning(
+            "Application status history lookup failed with HTTP %s", events_status
+        )
+        return jsonify({
+            "error": (
+                "Status history is unavailable. Run "
+                "backend/migrations/phase19_application_status_history.sql in Supabase."
+            )
+        }), 503
+    if not isinstance(events, list) or not all(isinstance(event, dict) for event in events):
+        app.logger.warning("Supabase returned invalid application status history.")
+        return jsonify({"error": "The status history response was invalid."}), 502
+    for event in events:
+        if (
+            event.get("to_status") not in allowed_statuses
+            or (
+                event.get("from_status") is not None
+                and event.get("from_status") not in allowed_statuses
+            )
+            or not isinstance(event.get("changed_at"), str)
+        ):
+            app.logger.warning("Supabase returned an invalid application status event.")
+            return jsonify({"error": "The status history response was invalid."}), 502
+    events.reverse()
+    history_complete = bool(
+        events
+        and events[0].get("from_status") is None
+        and events[0].get("to_status") == "Submitted"
+        and events[-1].get("to_status") == application["status"]
+        and len(events) < 500
+    )
+    return jsonify({
+        "application_id": application_id,
+        "current_status": application["status"],
+        "submitted_at": application["created_at"],
+        "history_complete": history_complete,
+        "events": events,
+    })
 
 
 @app.route("/api/job-applications/<string:application_id>/interview.ics")
@@ -1216,31 +2507,80 @@ def download_interview_calendar(application_id):
         "job_applications?select=id,job_title,company"
         f"&id=eq.{application_id}"
     )
+    slot_status, booked_slots = supabase_rest_request(
+        "application_interview_slots?select=starts_at"
+        f"&application_id=eq.{application_id}&status=eq.booked"
+        "&order=starts_at.asc&limit=1"
+    )
     review_status, reviews = supabase_rest_request(
         "application_reviews?select=interview_at"
         f"&application_id=eq.{application_id}"
     )
-    if not 200 <= app_status < 300 or not applications:
+    if app_status in (401, 403):
+        return jsonify({"error": "Your session cannot access this interview."}), app_status
+    if not 200 <= app_status < 300:
+        return jsonify({"error": "Could not load the application details."}), 502
+    if not isinstance(applications, list) or not applications:
         return jsonify({"error": "No interview date is available for this application."}), 404
-    interview_at = reviews[0].get("interview_at") if isinstance(reviews, list) and reviews else None
+    if not isinstance(applications[0], dict):
+        app.logger.warning("Supabase returned an invalid interview application.")
+        return jsonify({"error": "The application response was invalid."}), 502
+    slot_interview_at = None
+    if 200 <= slot_status < 300:
+        if not isinstance(booked_slots, list) or not all(
+            isinstance(slot, dict) for slot in booked_slots
+        ):
+            app.logger.warning("Supabase returned invalid booked interview slots.")
+            return jsonify({"error": "The interview slot response was invalid."}), 502
+        slot_interview_at = booked_slots[0].get("starts_at") if booked_slots else None
+    elif not (
+        slot_status in (400, 404)
+        and isinstance(booked_slots, dict)
+        and booked_slots.get("code") in {"42P01", "PGRST204", "PGRST205"}
+    ):
+        return jsonify({"error": "Could not load interview slots."}), 502
+    if not 200 <= review_status < 300:
+        return jsonify({"error": "Could not load the interview details."}), 502
+    if not isinstance(reviews, list) or not all(
+        isinstance(review, dict) for review in reviews
+    ):
+        app.logger.warning("Supabase returned invalid interview review records.")
+        return jsonify({"error": "The interview response was invalid."}), 502
+    interview_at = (
+        slot_interview_at
+        or (reviews[0].get("interview_at") if reviews else None)
+    )
     if not interview_at:
         notification_status, notifications = supabase_rest_request(
-            "notifications?select=data&notification_type=eq.interview_scheduled"
+            "notifications?select=data&notification_type=eq.interview_scheduled&limit=200"
         )
-        if 200 <= notification_status < 300 and isinstance(notifications, list):
-            interview_at = next(
-                (
-                    item.get("data", {}).get("interview_at")
-                    for item in notifications
-                    if isinstance(item, dict)
-                    and isinstance(item.get("data"), dict)
-                    and item["data"].get("application_id") == application_id
-                ),
-                None,
-            )
+        if not 200 <= notification_status < 300:
+            return jsonify({"error": "Could not load the interview notification."}), 502
+        if not isinstance(notifications, list) or not all(
+            isinstance(item, dict) for item in notifications
+        ):
+            app.logger.warning("Supabase returned invalid interview notifications.")
+            return jsonify({"error": "The interview notification response was invalid."}), 502
+        interview_at = next(
+            (
+                item.get("data", {}).get("interview_at")
+                for item in notifications
+                if isinstance(item.get("data"), dict)
+                and item["data"].get("application_id") == application_id
+            ),
+            None,
+        )
     if not interview_at:
         return jsonify({"error": "No interview date is available for this application."}), 404
-    response = app.make_response(interview_ics(applications[0], interview_at))
+    if not isinstance(interview_at, str):
+        app.logger.warning("Supabase returned an invalid interview timestamp.")
+        return jsonify({"error": "The interview date was invalid."}), 502
+    try:
+        calendar_content = interview_ics(applications[0], interview_at)
+    except ValueError:
+        app.logger.warning("Supabase returned an unparseable interview timestamp.")
+        return jsonify({"error": "The interview date was invalid."}), 502
+    response = app.make_response(calendar_content)
     response.headers["Content-Type"] = "text/calendar; charset=utf-8"
     response.headers["Content-Disposition"] = f"attachment; filename=careerlens-interview-{application_id}.ics"
     return response
@@ -1272,7 +2612,7 @@ def generate_application_materials():
         "career_profiles?select=current_position,target_role,headline,about,skills,location,phone,education"
     )
     project_status, projects = supabase_rest_request(
-        "career_projects?select=title,description,skills,contribution,project_url,started_on,completed_on&order=updated_at.desc"
+        "career_projects?select=title,description,skills,contribution,project_url,started_on,completed_on&order=updated_at.desc&limit=50"
     )
     account_status, accounts = supabase_rest_request(
         "user_accounts?select=display_name"
@@ -1286,16 +2626,34 @@ def generate_application_materials():
         if "PGRST205" in missing_codes or "42P01" in missing_codes:
             return jsonify({"error": "A required profile or listing migration is missing."}), 503
         return jsonify({"error": "Could not load the profile and job details."}), 502
-    if not isinstance(jobs, list) or not jobs:
+    if not isinstance(jobs, list) or len(jobs) != 1:
         return jsonify({"error": "Choose a published job listing."}), 404
+    if not isinstance(profiles, list) or len(profiles) > 1:
+        app.logger.warning("Supabase returned an invalid saved profile response.")
+        return jsonify({"error": "The saved profile response was invalid."}), 502
+    if not isinstance(projects, list) or len(projects) > 50:
+        app.logger.warning("Supabase returned an invalid portfolio project response.")
+        return jsonify({"error": "The portfolio project response was invalid."}), 502
+    if not isinstance(accounts, list) or len(accounts) > 1:
+        app.logger.warning("Supabase returned an invalid account response.")
+        return jsonify({"error": "The account response was invalid."}), 502
+    if not all(isinstance(account, dict) for account in accounts):
+        app.logger.warning("Supabase returned invalid account records.")
+        return jsonify({"error": "The account response was invalid."}), 502
     job = jobs[0]
-    profile = profiles[0] if isinstance(profiles, list) and profiles else {}
-    projects = projects if isinstance(projects, list) else []
-    candidate_name = (
-        accounts[0].get("display_name", "").strip()
-        if isinstance(accounts, list) and accounts and isinstance(accounts[0], dict)
-        else ""
-    )
+    profile = profiles[0] if profiles else {}
+    if not isinstance(job, dict) or not isinstance(profile, dict) or not all(
+        isinstance(project, dict) for project in projects
+    ):
+        app.logger.warning("Supabase returned invalid application material records.")
+        return jsonify({"error": "The saved profile or job response was invalid."}), 502
+    candidate_name = ""
+    if accounts:
+        display_name = accounts[0].get("display_name", "")
+        if not isinstance(display_name, str):
+            app.logger.warning("Supabase returned an invalid account display name.")
+            return jsonify({"error": "The account response was invalid."}), 502
+        candidate_name = display_name.strip()
 
     profile_text = json.dumps({
         "name": candidate_name,
@@ -1308,6 +2666,13 @@ def generate_application_materials():
         "projects": projects,
     }, ensure_ascii=False)
     job_text = json.dumps(job, ensure_ascii=False)
+    if len(profile_text) + len(job_text) > MAX_APPLICATION_MATERIALS_INPUT_LENGTH:
+        return jsonify({
+            "error": (
+                "The saved profile, projects, and job details exceed the "
+                "application-material input limit. Shorten the details and try again."
+            )
+        }), 413
     prompt = (
         "Create application materials for one real job from the supplied profile. "
         "Use only facts present in the profile and projects. Never invent employers, "
@@ -1318,6 +2683,9 @@ def generate_application_materials():
         f"Candidate and profile:\n{profile_text}\n\n"
         f"Job listing:\n{job_text}"
     )
+    rate_limit_response = gemini_rate_limit_response()
+    if rate_limit_response:
+        return rate_limit_response
     gemini_request = Request(
         "https://generativelanguage.googleapis.com/v1beta/interactions",
         data=json.dumps({
@@ -1341,9 +2709,13 @@ def generate_application_materials():
     except (json.JSONDecodeError, UnicodeDecodeError):
         return jsonify({"error": "Gemini returned an unreadable response. Please try again."}), 502
 
+    if not isinstance(provider_payload, dict) or not isinstance(
+        provider_payload.get("steps"), list
+    ):
+        return jsonify({"error": "Gemini returned an invalid application-material response."}), 502
     answer = "\n".join(
         item["text"]
-        for step in provider_payload.get("steps", [])
+        for step in provider_payload["steps"]
         if isinstance(step, dict) and step.get("type") == "model_output"
         and isinstance(step.get("content"), list)
         for item in step["content"]
@@ -1352,6 +2724,8 @@ def generate_application_materials():
     ).strip()
     if not answer:
         return jsonify({"error": "Gemini did not return application materials."}), 502
+    if len(answer) > 16000:
+        return jsonify({"error": "Gemini returned application materials that were too long."}), 502
     try:
         clean_answer = answer.strip()
         if clean_answer.startswith("```"):
@@ -1363,9 +2737,19 @@ def generate_application_materials():
         return jsonify({"error": "Gemini returned invalid application material content."}), 502
     bullets = materials.get("bullets") if isinstance(materials, dict) else None
     cover_letter = materials.get("cover_letter") if isinstance(materials, dict) else None
-    if not isinstance(bullets, list) or not all(isinstance(bullet, str) for bullet in bullets):
+    if (
+        not isinstance(bullets, list)
+        or len(bullets) > 8
+        or not all(
+            isinstance(bullet, str) and len(bullet.strip()) <= 500
+            for bullet in bullets
+        )
+    ):
         return jsonify({"error": "Gemini returned an invalid bullet list."}), 502
-    if not isinstance(cover_letter, str) or len(cover_letter.strip()) < 40:
+    if (
+        not isinstance(cover_letter, str)
+        or not 40 <= len(cover_letter.strip()) <= 12000
+    ):
         return jsonify({"error": "Gemini returned an invalid cover letter."}), 502
     bullets = [bullet.strip() for bullet in bullets if bullet.strip()][:8]
     supabase_rest_request(
@@ -1439,6 +2823,10 @@ def ai_assist():
     if not re.fullmatch(r"[A-Za-z0-9._-]+", GEMINI_MODEL):
         app.logger.error("GEMINI_MODEL contains unsupported characters")
         return jsonify({"error": "Gemini is not configured correctly. Check GEMINI_MODEL."}), 503
+
+    rate_limit_response = gemini_rate_limit_response()
+    if rate_limit_response:
+        return rate_limit_response
 
     prompt = (
         "You are CareerLens, a career-support assistant. Provide constructive, "
@@ -1529,6 +2917,8 @@ def ai_assist():
     ).strip()
     if not answer:
         return jsonify({"error": "Gemini did not return a text response. Please try again."}), 502
+    if len(answer) > 12000:
+        return jsonify({"error": "Gemini returned a response that was too long. Please try again."}), 502
     return jsonify({"answer": answer})
 
 

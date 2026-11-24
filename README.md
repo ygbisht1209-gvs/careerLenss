@@ -11,7 +11,10 @@ authentication, database access, and private résumé storage under Row Level
 Security policies. Flask provides authenticated API endpoints and processes
 uploaded résumé PDFs in memory. Optional Gemini requests are sent by Flask only
 after the user opts in; the Gemini key is never sent to the browser. The app
-does not require a local database or persistent application disk.
+does not require a local database or persistent application disk. Each Gemini
+route is capped at five requests per minute per authenticated session in each
+Flask process; only a keyed hash of the bearer token is kept in memory. The cap
+is not shared across multiple workers or instances.
 
 ## Set up Supabase once
 
@@ -38,6 +41,56 @@ does not require a local database or persistent application disk.
    rerunnable migration creates an empty verified-resource catalogue and
    per-user learning plans; it does not add sample courses or modify existing
    user data. Do not execute it against production without reviewing it first.
+6. To enable private saved-job bookmarks, run
+   [`backend/migrations/phase18_saved_jobs.sql`](backend/migrations/phase18_saved_jobs.sql)
+   in the same Supabase project. Row Level Security limits saved jobs to the
+   signed-in job seeker who created each bookmark.
+7. To enable applicant-visible status timelines, run
+   [`backend/migrations/phase19_application_status_history.sql`](backend/migrations/phase19_application_status_history.sql)
+   in the same Supabase project. RLS limits status history to its applicant.
+   The migration records status transitions from the time it is installed;
+   earlier transitions are not backfilled because their dates are unavailable.
+8. Run
+   [`backend/migrations/phase20_rejection_feedback.sql`](backend/migrations/phase20_rejection_feedback.sql)
+   to create the rejection-feedback table used by the later structured
+   rejection migration. Reviewer notes remain provider-private under separate
+   RLS.
+9. To optimize recorded application response-time queries, run
+   [`backend/migrations/phase21_application_analytics.sql`](backend/migrations/phase21_application_analytics.sql)
+   after Phase 19. It adds an index only; no data is seeded.
+10. To enable private résumé version tracking, run
+    [`backend/migrations/phase22_resume_versions.sql`](backend/migrations/phase22_resume_versions.sql)
+    in the same project. Job seekers can reuse saved versions; providers can
+    access only the version attached to their application.
+11. To notify applicants about every recorded application-stage change and
+    providers when an applicant withdraws, run
+    [`backend/migrations/phase23_notification_calendar_enhancements.sql`](backend/migrations/phase23_notification_calendar_enhancements.sql)
+    after Phase 16. Notifications remain owner-scoped by the existing RLS
+    policies. Applicants and listing providers can download an interview date
+    as a calendar file when the application and interview are visible to them.
+12. To let providers offer 30-minute interview times and applicants book or
+    cancel them, run
+    [`backend/migrations/phase24_interview_slot_booking.sql`](backend/migrations/phase24_interview_slot_booking.sql)
+    after Phases 16 and 23. Database locking prevents a provider from having
+    overlapping booked slots, and only the applicant or listing provider can
+    view or change the related booking.
+13. To enable the private STAR Story Bank, run
+    [`backend/migrations/phase25_star_story_bank.sql`](backend/migrations/phase25_star_story_bank.sql)
+    in the same project. Job seekers can create, edit, and delete their own
+    self-reported stories; row-level security denies other accounts and providers.
+14. To enable employer response metrics, run
+    [`backend/migrations/phase26_employer_response_transparency.sql`](backend/migrations/phase26_employer_response_transparency.sql)
+    after the base schema and Phase 19 status-history migration. It exposes
+    thresholded aggregate metrics and provider-scoped reads of stage events;
+    status events are not backfilled or client-writable.
+15. Phase 27 is also required for the structured rejection workflow described
+    in step 8. Run
+    [`backend/migrations/phase27_structured_rejection_feedback.sql`](backend/migrations/phase27_structured_rejection_feedback.sql)
+    after the base schema and Phase 20. Providers must select one fixed
+    rejection reason; notes are capped at 500 characters and are private unless
+    explicitly shared. The Phase 27 RPC updates the stage and rejection
+    details atomically, and applicant reads redact unshared notes. Migrations
+    are manual; the app does not apply them automatically.
 
 The learning catalogue is intentionally administrator-managed through the
 Supabase SQL Editor. Add a category and resources only after verifying their
@@ -244,10 +297,69 @@ From the repository root, run:
 
 The tests cover configuration, authentication gating, resume-upload validation,
 PDF parsing, skill-gap and explainable job matching, learning recommendations,
-and mocked Gemini behavior. Supabase proxy tests are mocked; the suite does not
-contact Supabase or Gemini.
+provider-only routes, safe API errors, Gemini request caps, and mocked Gemini
+behavior. SQL policy tests inspect source contracts only; the suite does not
+contact Supabase or Gemini and does not prove live RLS isolation.
 GitHub Actions runs the same tests and checks the frontend JavaScript syntax on
 every push and pull request.
+
+## Manual demonstration QA checklist
+
+Use an isolated, non-production Supabase project, synthetic data, and two job
+seeker accounts plus two job provider accounts. Apply the base schema and the
+optional migrations for every feature under test before starting.
+
+- **Authentication and roles:** create/sign in/out each account type; confirm
+  job seekers cannot call provider endpoints and providers cannot use seeker-
+  only endpoints.
+- **Job seekers:** save profile details and a project; check profile
+  completeness and application counts; browse jobs, test filters/sorting,
+  bookmark a job, and verify only that account sees the bookmark. For a
+  synthetic listing, verify response metrics appear on dashboard
+  recommendations, listing cards, and the apply detail; they are withheld
+  below five applications and shown at five or more.
+- **Applications:** submit a harmless PDF (under 5 MB), review the status in the
+  tracker, test sorting and overdue follow-up, and confirm delete asks first.
+  Save a labeled résumé version, apply using it, then apply to another test job
+  with a different version and confirm each provider can access only its
+  selected version. Change application stages and confirm the applicant receives
+  status notifications; download the interview calendar from the notification.
+- **Interview booking:** offer several future times as a provider, book one as
+  the applicant, verify an overlapping slot cannot be booked for another
+  application with the same provider, and test cancellation from both accounts.
+  Confirm both accounts receive the appropriate notification and calendar
+  downloads stop working after cancellation.
+- **Skills and learning:** analyze a synthetic job description, inspect all
+  three evidence groups, add a suggested resource to the learning plan, and
+  verify progress is labeled self-reported.
+- **STAR stories and interview prep:** create, edit, and delete a private story;
+  add it to an interview answer note and confirm the text stays in the browser
+  and is not included in the Gemini request. Verify the empty bank state and
+  confirm another seeker and a provider cannot read or modify the story.
+- **Providers:** create a draft, publish/close it, duplicate it, and verify
+  applicant counts. Search/filter applicants, change a stage, and set an
+  interview date; download its calendar file and confirm the provider sees
+  reviewer notes and the applicant does not. Reject a synthetic application
+  with each fixed reason, confirm a reason is required, and save a note with
+  sharing off and on. Verify the seeker always sees the reason, sees the note
+  only when shared, and can open Skill Gap Analysis with role requirements and
+  catalogue suggestions for a `skills_gap` rejection. Check the response
+  aggregate on the provider dashboard using only its owned listings. Withdraw
+  a test application as a seeker and confirm the provider is notified.
+- **Cross-account isolation:** use seeker B and provider B to try accessing
+  seeker A's profile, projects, plans, saved jobs, STAR stories, manual
+  applications, and submitted interview slots; verify provider B cannot access
+  provider A's listings, applicants, slots, reviews, or rejection notes. Use
+  seeker B to verify an unshared rejection note from seeker A is not readable.
+  Confirm saved résumé versions are private to their owner unless selected on
+  an application, and each provider can access only the selected version for
+  its own listing.
+- **Optional AI:** only with a test key and explicit consent, submit synthetic
+  text; verify normal workflows still work without Gemini and that rate-limit
+  responses are clear.
+
+These are manual checks to perform; repository tests do not establish that a
+configured Supabase project enforces the policies correctly.
 
 If the dashboard says Supabase cannot find `public.applications`, check that
 the Supabase project open in the SQL Editor is the same project whose URL is in
@@ -378,19 +490,38 @@ applicant data.
   and sign-out, with a job-seeker or job-provider account type chosen at
   registration.
 - Private per-account application tracking and career profile storage.
-- Job providers can draft, publish, and close listings, then review and update
-  application statuses. Job seekers can browse published roles, apply within
+- Job providers can filter draft, published, and closed listings, duplicate
+  listings as drafts, and see an applicant count per listing. The Applicants
+  workspace provides search and stage filters, a candidate table, per-applicant
+  stage updates, interview scheduling, and an expandable required/preferred
+  evidence breakdown. Its deterministic alignment is informational only, not a
+  hiring score or recommendation. Flask provider endpoints verify the account
+  role, and listing ownership is also enforced by Supabase RLS.
+  Job seekers can browse published roles, apply within
   CareerLens, and follow each application. Applicant contact details and
   messages are shared only with the provider for the selected listing.
 - Job applications include a required PDF résumé (up to 5 MB) and optional
   introduction. Résumés are stored in a private Supabase bucket and are
   accessible only to the applicant and the provider who owns that listing.
+  Job seekers may retain labeled résumé versions and choose which version is
+  attached to each application; providers can access only the selected version
+  for their listing.
   Providers can review CVs, move candidates through CV review, shortlist,
   interview, offer, hire, or reject stages, add private reviewer notes, and
-  optionally record an interview date. Applicants can see their current stage;
-  reviewer notes are private to the hiring provider.
+  optionally record an interview date. Applicants can see their current stage,
+  a timestamped status timeline after the Phase 19 migration, and a required
+  structured rejection reason after Phases 20 and 27. Optional rejection notes
+  are shared only by explicit opt-in; a `skills_gap` reason links to the role's
+  requirements and catalogue learning suggestions. Older transitions are
+  labeled unavailable rather than assigned guessed dates. Reviewer notes are
+  private to the hiring provider and are not included in applicant feedback
+  responses.
 - An application pipeline with editable records, status filters, search,
   follow-up reminders, notes, job links, summary metrics, and CSV export.
+  The seeker dashboard shows counts by the exact recorded status from both the
+  personal tracker and CareerLens applications. Average first provider
+  response time uses only complete, timestamped CareerLens status histories;
+  it excludes manual tracker entries and is descriptive, not predictive.
 - Job-specific résumé bullets and a cover-letter draft workspace. Select a
   published listing to generate materials from the saved My Profile and
   portfolio projects. The draft is stored privately per job, and Gemini receives
@@ -400,6 +531,11 @@ applicant data.
   sets, practice notes, progress tracking, and a downloadable interview
   checklist from a job description. Input text is processed for the request
   and is not stored; prompts are practice ideas, not interview predictions.
+- A private STAR Story Bank lets job seekers save, edit, and delete concise
+  self-reported Situation, Task, Action, and Result examples with optional
+  skill tags. Stories are not verified or shared with employers. In Interview
+  Prep, a selected story can be added to browser-only answer notes; it is not
+  sent to Gemini by that workflow.
 - Authenticated, job-seeker-only Skill Gap Analysis compares recognized
   requirements in a job description with profile skills, optional experience
   notes, and an optional uploaded résumé PDF. It distinguishes contextual
@@ -408,6 +544,21 @@ applicant data.
   or predict hiring. Analysis inputs are processed for the request and are not
   saved. Recognition uses a built-in skill vocabulary and does not require
   Gemini or a database migration.
+- Job seekers can filter Find Jobs by employment type, location, alignment
+  level, or saved status and sort by alignment, newest listing, or company.
+  Compact match badges and expandable explanations remain tied to deterministic
+  evidence. Private saved-job bookmarks require the saved-jobs migration and
+  are isolated by account RLS. A what-if panel recalculates deterministic
+  alignment after hypothetical skill additions/removals without saving profile
+  changes; hypothetical skills do not verify proficiency and are not a hiring
+  prediction. This in-memory feature requires no database migration.
+- Employer response transparency displays a listing's response rate and median
+  first-response time only when at least five applications exist. The provider
+  dashboard shows the corresponding pooled aggregate across that provider's
+  listings. Calculations use current application stages and recorded Phase 19
+  status timestamps; older history is not backfilled, and the median is shown
+  only when a response timestamp is available. These are descriptive
+  historical metrics, not predictions or hiring recommendations.
 - A job-seeker Learning workspace browses the administrator-managed catalogue
   by title/skill, category, and difficulty; shows resource descriptions,
   objectives, skill tags, and original links; and saves a personal plan with

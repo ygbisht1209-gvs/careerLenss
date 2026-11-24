@@ -85,6 +85,16 @@ test("application sources are summarized separately using their stored statuses"
         hired: 1
     });
     assert.equal(summary.profile.linkedResumeCount, 2);
+    assert.deepEqual(summary.applications.statusCounts, [
+        { status: "Applied", manual: 1, careerLens: 0, total: 1 },
+        { status: "Submitted", manual: 0, careerLens: 1, total: 1 },
+        { status: "Interview", manual: 1, careerLens: 1, total: 2 },
+        { status: "Offer", manual: 1, careerLens: 0, total: 1 },
+        { status: "Hired", manual: 0, careerLens: 1, total: 1 },
+        { status: "Rejected", manual: 1, careerLens: 0, total: 1 },
+        { status: "Withdrawn", manual: 0, careerLens: 1, total: 1 }
+    ]);
+    assert.equal(summary.applications.countsComplete, true);
 });
 
 test("next actions point to existing features and avoid generic populated actions", () => {
@@ -97,6 +107,16 @@ test("next actions point to existing features and avoid generic populated action
             match: { score: 75 }
         }],
         manualApplications: [{ status: "Applied" }]
+    });
+
+    test("application status counts are unavailable rather than partial at the record limit", () => {
+        const summary = summarizeCareerDashboard({
+            manualApplications: Array.from({ length: 1000 }, () => ({ status: "Applied" }))
+        });
+        assert.equal(summary.applications.countsComplete, false);
+        assert.deepEqual(summary.applications.statusCounts, [
+            { status: "Applied", manual: 1000, careerLens: 0, total: 1000 }
+        ]);
     });
     const actions = getCareerNextActions(summary);
 

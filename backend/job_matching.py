@@ -379,3 +379,69 @@ def build_job_recommendations(
             ),
         },
     }
+
+
+def build_job_what_if(
+    job,
+    profile,
+    add_skills=(),
+    remove_skills=(),
+    learning_records=(),
+    learning_records_available=True,
+):
+    profile = profile if isinstance(profile, dict) else {}
+    existing_skills = profile.get("skills")
+    if not isinstance(existing_skills, list):
+        existing_skills = []
+    existing_names = {
+        normalized
+        for skill in existing_skills
+        if isinstance(skill, str)
+        and (normalized := normalize_skill_name(skill))
+    }
+    additions = {
+        normalized
+        for skill in add_skills
+        if isinstance(skill, str)
+        and (normalized := normalize_skill_name(skill))
+    }
+    removals = {
+        normalized
+        for skill in remove_skills
+        if isinstance(skill, str)
+        and (normalized := normalize_skill_name(skill))
+    }
+    simulated_skills = [
+        skill for skill in existing_skills
+        if not (
+            isinstance(skill, str)
+            and normalize_skill_name(skill) in removals
+        )
+    ]
+    effective_additions = sorted(additions - existing_names)
+    effective_removals = sorted(removals & existing_names)
+    simulated_skills.extend(effective_additions)
+    simulated_profile = {**profile, "skills": simulated_skills}
+
+    baseline = build_job_recommendations(
+        [job], profile, learning_records, learning_records_available
+    )
+    simulated = build_job_recommendations(
+        [job], simulated_profile, learning_records, learning_records_available
+    )
+    baseline_match = baseline["jobs"][0]["match"] if baseline["jobs"] else None
+    simulated_match = simulated["jobs"][0]["match"] if simulated["jobs"] else None
+    baseline_score = baseline_match["score"] if baseline_match else None
+    simulated_score = simulated_match["score"] if simulated_match else None
+    return {
+        "baseline_score": baseline_score,
+        "simulated_score": simulated_score,
+        "delta": (
+            simulated_score - baseline_score
+            if baseline_score is not None and simulated_score is not None
+            else None
+        ),
+        "simulated_match": simulated_match,
+        "added_skills": effective_additions,
+        "removed_skills": effective_removals,
+    }

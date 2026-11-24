@@ -19,6 +19,14 @@ const jobApplicationDialog = document.getElementById("job-application-dialog");
 const jobApplicationForm = document.getElementById("job-application-form");
 const statuses = ["Applied", "Under Review", "Interview", "Offer", "Rejected"];
 const accountTypes = ["job_seeker", "job_provider"];
+const rejectionFeedbackReasons = [
+    ["skills_gap", "Skills gap"],
+    ["experience_level", "Experience level"],
+    ["position_filled", "Position filled"],
+    ["role_requirements_changed", "Role requirements changed"],
+    ["application_incomplete", "Application incomplete"],
+    ["other", "Other"]
+];
 
 let supabaseClient = null;
 let currentUser = null;
@@ -35,13 +43,25 @@ let editingApplicationId = null;
 let currentInterviewPack = null;
 let currentAccountType = null;
 let currentJobListings = [];
+let jobResponsivenessAvailable = false;
+let jobResponseMetrics = new Map();
+let providerResponseMetrics = null;
+let providerResponseMetricsError = "";
 let jobMatches = new Map();
 let jobProfileSummary = null;
 let currentJobApplications = [];
 let currentApplicationReviews = new Map();
+let currentInterviewSlots = [];
+let currentApplicationRejectionFeedback = new Map();
+let pendingRejectionApplication = null;
+let pendingRejectionControl = null;
 let currentApplicantMatches = new Map();
 let currentNotifications = [];
 let seekerApplications = [];
+let currentResumeVersions = [];
+let applicationAnalytics = null;
+let applicationAnalyticsLoading = false;
+let applicationAnalyticsError = "";
 let editingJobId = null;
 let applyingToJobId = null;
 let learningResources = [];
@@ -49,6 +69,10 @@ let learningPlan = [];
 let latestSkillGapResult = null;
 let latestLearningRecommendations = null;
 let learningRecommendationError = "";
+let savedJobIds = new Set();
+let currentStarStories = [];
+let starStoriesAvailable = false;
+let editingStarStoryId = null;
 
 function setMessage(element, message, kind = "") {
     if (!element) return;
@@ -248,6 +272,10 @@ function clearWorkspaceData() {
     dashboardSources = {};
     currentAccountType = null;
     currentJobListings = [];
+    jobResponsivenessAvailable = false;
+    jobResponseMetrics = new Map();
+    providerResponseMetrics = null;
+    providerResponseMetricsError = "";
     jobMatches = new Map();
     jobProfileSummary = null;
     learningResources = [];
@@ -258,11 +286,23 @@ function clearWorkspaceData() {
     populateSkillJobListings();
     currentJobApplications = [];
     currentApplicationReviews = new Map();
+    currentInterviewSlots = [];
+    currentApplicationRejectionFeedback = new Map();
     currentApplicantMatches = new Map();
     currentNotifications = [];
     const notificationCount = document.getElementById("notification-count");
     if (notificationCount) notificationCount.hidden = true;
     seekerApplications = [];
+    currentResumeVersions = [];
+    currentStarStories = [];
+    starStoriesAvailable = false;
+    editingStarStoryId = null;
+    resetStarStoryEditor();
+    document.getElementById("star-story-list").replaceChildren();
+    setMessage(document.getElementById("star-story-message"), "");
+    applicationAnalytics = null;
+    applicationAnalyticsLoading = false;
+    applicationAnalyticsError = "";
     editingJobId = null;
     applyingToJobId = null;
     jobForm.reset();
@@ -271,6 +311,8 @@ function clearWorkspaceData() {
     if (jobApplicationDialog.open) jobApplicationDialog.close();
     applicationSearch.value = "";
     applicationFilter.value = "all";
+    const applicationSort = document.getElementById("application-sort");
+    if (applicationSort) applicationSort.value = "follow-up";
     renderApplications();
     document.getElementById("profile-form").reset();
     document.getElementById("my-profile-form").reset();
@@ -300,8 +342,12 @@ function clearWorkspaceData() {
     document.getElementById("sidebar-profile-link").setAttribute("aria-label", "Open profile");
     document.getElementById("provider-job-filter").value = "all";
     document.getElementById("provider-applicant-filter").value = "all";
+    document.getElementById("provider-applicant-search").value = "";
+    document.getElementById("provider-listing-status-filter").value = "all";
     document.getElementById("job-search").value = "";
     document.getElementById("job-type-filter").value = "all";
+    document.getElementById("job-location-filter").value = "";
+    document.getElementById("job-match-filter").value = "all";
     document.getElementById("job-sort").value = "relevance";
     const profileGuidance = document.getElementById("job-profile-guidance");
     profileGuidance.hidden = true;
@@ -391,6 +437,7 @@ async function openWorkspace(user) {
                 loadJobBoard(),
                 loadLearningWorkspace(),
                 loadPortfolioProjects(),
+                loadStarStories(),
                 loadNotifications(),
             ]);
         }
@@ -570,6 +617,9 @@ function supabaseErrorMessage(error) {
     ) {
         return "The employer profile field is missing. In the same Supabase project configured by backend/.env, run backend/migrations/phase11_employer_profile.sql, then reload CareerLens.";
     }
+    if (/resume_versions|resume_version_id/i.test(errorText)) {
+        return "Résumé version tracking is not set up yet. Run backend/migrations/phase22_resume_versions.sql in the Supabase SQL Editor, then reload CareerLens.";
+    }
     if (/user_accounts|job_listings|job_applications|application_reviews|application-resumes|bucket not found/i.test(`${error?.message || ""} ${error?.details || ""}`)) {
         return "CareerLens could not find the latest hiring tables or private résumé storage. In the Supabase project configured in backend/.env, run the latest backend/supabase_schema.sql from the SQL Editor, then reload the app.";
     }
@@ -610,35 +660,66 @@ async function loadApplications() {
 async function loadProviderWorkspace() {
     const userId = currentUser?.id;
     if (!userId) return;
-    const [jobsResult, applicationsResult, reviewsResult] = await Promise.all([
+    const [
+        jobsResult,
+        applicationsResult,
+        reviewsResult,
+        rejectionFeedbackResult,
+        interviewSlotsResult,
+        responseMetricsResult
+    ] = await Promise.all([
         supabaseClient.from("job_listings").select("*").order("created_at", { ascending: false }),
         supabaseClient
             .from("job_applications")
             .select("id,job_id,applicant_id,applicant_name,applicant_email,cover_note,resume_path,status,created_at,job_listings(title,company)")
             .order("created_at", { ascending: false }),
-        supabaseClient
-            .from("application_reviews")
-            .select("application_id,reviewer_notes,interview_at")
+        careerApi("/api/provider/application-reviews"),
+        careerApi("/api/provider/application-rejection-feedback").catch((error) => ({ error, feedback: [] })),
+        careerApi("/api/provider/interview-slots").catch((error) => ({ error, slots: [] })),
+        careerApi("/api/provider/response-metrics").catch((error) => ({ error }))
     ]);
     if (currentUser?.id !== userId) return;
     if (jobsResult.error) throw jobsResult.error;
     if (applicationsResult.error) throw applicationsResult.error;
-    if (reviewsResult.error) throw reviewsResult.error;
     currentJobListings = jobsResult.data || [];
     currentJobApplications = applicationsResult.data || [];
+    providerResponseMetrics = responseMetricsResult.error
+        ? null
+        : responseMetricsResult;
+    providerResponseMetricsError = responseMetricsResult.error?.message || "";
     currentApplicationReviews = new Map(
-        (reviewsResult.data || []).map((review) => [review.application_id, review])
+        (reviewsResult || []).map((review) => [review.application_id, review])
+    );
+    if (interviewSlotsResult.error) {
+        currentInterviewSlots = [];
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            interviewSlotsResult.error.message || "Interview slots are unavailable.",
+            "error"
+        );
+    } else {
+        currentInterviewSlots = interviewSlotsResult.slots || [];
+    }
+    if (rejectionFeedbackResult.error) {
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            rejectionFeedbackResult.error.message || "Applicant-visible feedback is unavailable.",
+            "error"
+        );
+    }
+    currentApplicationRejectionFeedback = new Map(
+        (rejectionFeedbackResult.feedback || []).map((item) => [item.application_id, item])
     );
     currentApplicantMatches = new Map();
     try {
-        const rankingResult = await careerApi("/api/provider-applicant-rankings");
-        (rankingResult.rankings || []).forEach((ranking) => {
-            currentApplicantMatches.set(ranking.application_id, ranking.match);
+        const evidenceResult = await careerApi("/api/provider-applicant-evidence");
+        (evidenceResult.evidence || []).forEach((item) => {
+            currentApplicantMatches.set(item.application_id, item.match);
         });
     } catch (error) {
         setMessage(
             document.getElementById("provider-applicants-message"),
-            error.message || "Applicant evidence rankings are unavailable.",
+            error.message || "Applicant evidence details are unavailable.",
             "error"
         );
     }
@@ -648,6 +729,7 @@ async function loadProviderWorkspace() {
 async function loadSeekerApplications() {
     const userId = currentUser?.id;
     if (!userId) return;
+    void loadApplicationAnalytics();
     const { data, error } = await supabaseClient
         .from("job_applications")
         .select("id,job_id,job_title,company,status,resume_path,created_at")
@@ -661,8 +743,43 @@ async function loadSeekerApplications() {
     }
     seekerApplications = data || [];
     dashboardSources.careerApplications = true;
+    try {
+        const result = await careerApi("/api/job-applications/interview-slots");
+        if (currentUser?.id !== userId) return;
+        currentInterviewSlots = Array.isArray(result.slots) ? result.slots : [];
+    } catch (slotError) {
+        if (currentUser?.id !== userId) return;
+        currentInterviewSlots = [];
+        setMessage(
+            document.getElementById("my-job-applications-message"),
+            slotError.message || "Interview times are unavailable.",
+            "error"
+        );
+    }
     renderSeekerApplications();
     renderDashboard();
+}
+
+async function loadApplicationAnalytics() {
+    const userId = currentUser?.id;
+    if (!userId || currentAccountType !== "job_seeker") return;
+    applicationAnalytics = null;
+    applicationAnalyticsError = "";
+    applicationAnalyticsLoading = true;
+    renderDashboard();
+    try {
+        const result = await careerApi("/api/application-analytics");
+        if (currentUser?.id !== userId) return;
+        applicationAnalytics = result;
+    } catch (error) {
+        if (currentUser?.id !== userId) return;
+        applicationAnalyticsError = error.message || "Response-time data is unavailable.";
+    } finally {
+        if (currentUser?.id === userId) {
+            applicationAnalyticsLoading = false;
+            renderDashboard();
+        }
+    }
 }
 
 async function loadJobBoard() {
@@ -673,11 +790,33 @@ async function loadJobBoard() {
         "Comparing your profile with published jobs..."
     );
     try {
-        const result = await careerApi("/api/job-recommendations");
+        const [result, savedResult, responsivenessResult] = await Promise.all([
+            careerApi("/api/job-recommendations"),
+            careerApi("/api/saved-jobs").catch(() => []),
+            careerApi("/api/jobs/responsiveness")
+                .then((response) => ({ response }))
+                .catch((error) => ({ error }))
+        ]);
         if (currentUser?.id !== userId) return;
+        savedJobIds = new Set(
+            Array.isArray(savedResult)
+                ? savedResult.map((item) => item.job_id).filter(Boolean)
+                : []
+        );
+        jobResponsivenessAvailable = !responsivenessResult.error
+            && Array.isArray(responsivenessResult.response?.metrics);
+        jobResponseMetrics = new Map(
+            jobResponsivenessAvailable
+                ? responsivenessResult.response.metrics
+                    .filter((item) => item?.job_id)
+                    .map((item) => [item.job_id, item])
+                : []
+        );
         if (!result || !Array.isArray(result.jobs) || !result.profile) {
             throw new Error("The recommendation service returned an unexpected response.");
         }
+        jobResponsivenessAvailable = jobResponsivenessAvailable
+            && result.jobs.every((job) => job?.id && jobResponseMetrics.has(job.id));
         const providerIds = [...new Set(
             result.jobs.map((job) => job?.provider_id).filter(Boolean)
         )];
@@ -694,7 +833,8 @@ async function loadJobBoard() {
         );
         currentJobListings = result.jobs.map((job) => ({
             ...job,
-            recruiter_profile: recruiterProfiles.get(job.provider_id) || null
+            recruiter_profile: recruiterProfiles.get(job.provider_id) || null,
+            response_metrics: jobResponseMetrics.get(job.id) || null
         }));
         jobMatches = new Map(
             result.jobs.filter((job) => job?.id && job.match)
@@ -728,6 +868,12 @@ async function loadJobBoard() {
                 "Private portfolio projects are not included. Install the Phase 5 portfolio migration to use project evidence."
             );
         }
+        if (!jobResponsivenessAvailable) {
+            messages.push(
+                responsivenessResult.error?.message
+                    || "Employer response metrics are unavailable; verify the Phase 19 and Phase 26 migrations."
+            );
+        }
         guidance.hidden = !messages.length;
         guidance.textContent = messages.join(" ");
         setMessage(document.getElementById("job-board-message"), "");
@@ -735,6 +881,8 @@ async function loadJobBoard() {
     } catch (error) {
         if (currentUser?.id !== userId) return;
         currentJobListings = [];
+        jobResponsivenessAvailable = false;
+        jobResponseMetrics = new Map();
         jobMatches = new Map();
         jobProfileSummary = null;
         dashboardSources.recommendations = false;
@@ -905,12 +1053,13 @@ function renderProviderMetrics() {
     document.getElementById("provider-applicant-count").textContent = String(currentJobApplications.length);
     document.getElementById("provider-review-count").textContent = String(review);
     document.getElementById("provider-closed-count").textContent = String(closed);
+    renderProviderResponseMetrics();
 
     const recent = document.getElementById("provider-recent-applicants");
     recent.replaceChildren();
     currentJobApplications.slice(0, 4).forEach((application) => {
         const row = document.createElement("article");
-        row.className = "provider-applicant-row";
+        row.className = "provider-applicant-table-row";
         const details = document.createElement("div");
         const name = document.createElement("strong");
         name.textContent = application.applicant_name;
@@ -926,6 +1075,33 @@ function renderProviderMetrics() {
     if (!currentJobApplications.length) {
         recent.appendChild(createEmptyState("No applications yet", "Publish a job to start receiving applications."));
     }
+}
+
+function renderProviderResponseMetrics() {
+    const container = document.getElementById("provider-response-summary");
+    container.replaceChildren();
+    if (providerResponseMetricsError) {
+        const message = document.createElement("p");
+        message.className = "muted-text";
+        message.textContent = `Response metrics unavailable: ${providerResponseMetricsError}`;
+        container.appendChild(message);
+        return;
+    }
+    container.appendChild(
+        createResponseMetricsElement(providerResponseMetrics, true, true)
+    );
+}
+
+async function refreshProviderResponseMetrics() {
+    try {
+        providerResponseMetrics = await careerApi("/api/provider/response-metrics");
+        providerResponseMetricsError = "";
+    } catch (error) {
+        providerResponseMetrics = null;
+        providerResponseMetricsError =
+            error.message || "Provider response metrics are unavailable.";
+    }
+    renderProviderResponseMetrics();
 }
 
 function createEmptyState(title, message) {
@@ -1085,6 +1261,199 @@ function createJobMatchDetails(job, match) {
     return details;
 }
 
+function createJobWhatIfPanel(job) {
+    const details = document.createElement("details");
+    details.className = "job-what-if";
+    const summary = document.createElement("summary");
+    summary.textContent = "What-if match simulation";
+    const content = document.createElement("div");
+    content.className = "job-what-if-content";
+    const note = document.createElement("p");
+    note.className = "muted-text";
+    note.textContent =
+        "Model adding or removing recognized skills from your profile. This is a simulation only; listed skills are not verified and nothing is saved.";
+    const addLabel = document.createElement("label");
+    addLabel.textContent = "Skills to add (comma-separated)";
+    const addInput = document.createElement("input");
+    addInput.type = "text";
+    addInput.maxLength = 500;
+    addInput.setAttribute("aria-label", `Skills to add for ${job.title} simulation`);
+    addLabel.appendChild(addInput);
+    const removeLabel = document.createElement("label");
+    removeLabel.textContent = "Skills to remove (comma-separated)";
+    const removeInput = document.createElement("input");
+    removeInput.type = "text";
+    removeInput.maxLength = 500;
+    removeInput.setAttribute("aria-label", `Skills to remove for ${job.title} simulation`);
+    removeLabel.appendChild(removeInput);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button";
+    button.textContent = "Calculate simulation";
+    const result = document.createElement("div");
+    result.className = "job-what-if-result";
+    button.addEventListener("click", () => runJobMatchWhatIf(
+        job,
+        addInput,
+        removeInput,
+        result,
+        button
+    ));
+    content.append(note, addLabel, removeLabel, button, result);
+    details.append(summary, content);
+    return details;
+}
+
+async function runJobMatchWhatIf(job, addInput, removeInput, container, button) {
+    const previousLabel = button.textContent;
+    const parseSkills = (input) => input.value
+        .split(",")
+        .map((skill) => skill.trim())
+        .filter(Boolean);
+    const addSkills = parseSkills(addInput);
+    const removeSkills = parseSkills(removeInput);
+    container.replaceChildren();
+    button.disabled = true;
+    button.textContent = "Calculating...";
+    try {
+        const result = await careerApi(
+            `/api/job-recommendations/${encodeURIComponent(job.id)}/what-if`,
+            {
+                method: "POST",
+                body: JSON.stringify({
+                    add_skills: addSkills,
+                    remove_skills: removeSkills
+                })
+            }
+        );
+        const scores = document.createElement("p");
+        const baseLabel = result.baseline_score === null
+            ? "-- (insufficient baseline evidence)"
+            : `${result.baseline_score}/100`;
+        const simulatedLabel = result.simulated_score === null
+            ? "-- (insufficient simulated evidence)"
+            : `${result.simulated_score}/100`;
+        scores.textContent = `Current profile alignment: ${baseLabel}. Simulated alignment: ${simulatedLabel}.`;
+        container.appendChild(scores);
+        const delta = document.createElement("p");
+        delta.textContent = result.delta === null
+            ? "A point change is unavailable because one comparison has insufficient evidence."
+            : `Simulated change: ${result.delta > 0 ? "+" : ""}${result.delta} points.`;
+        const appliedChanges = document.createElement("p");
+        const added = result.added_skills || [];
+        const removed = result.removed_skills || [];
+        appliedChanges.textContent = added.length || removed.length
+            ? `Applied to simulation: ${added.length ? `added ${added.join(", ")}` : ""}${added.length && removed.length ? "; " : ""}${removed.length ? `removed ${removed.join(", ")}` : ""}.`
+            : "No requested skill changes affected the saved profile.";
+        container.append(delta, appliedChanges);
+        const simulationNote = document.createElement("p");
+        simulationNote.className = "muted-text";
+        simulationNote.textContent = result.note;
+        container.appendChild(simulationNote);
+        const explanation = document.createElement("details");
+        const explanationSummary = document.createElement("summary");
+        explanationSummary.textContent = "View simulated skill evidence";
+        explanation.appendChild(explanationSummary);
+        explanation.append(
+            createMatchSkillList(
+                "Required skills (simulation)",
+                result.simulated_match?.required_skills || []
+            ),
+            createMatchSkillList(
+                "Preferred skills (simulation)",
+                result.simulated_match?.preferred_skills || []
+            )
+        );
+        container.appendChild(explanation);
+    } catch (error) {
+        const message = document.createElement("p");
+        message.className = "form-message error";
+        message.setAttribute("role", "alert");
+        message.textContent = error.message || "Could not calculate this simulation.";
+        container.appendChild(message);
+    } finally {
+        button.disabled = false;
+        button.textContent = previousLabel;
+    }
+}
+
+async function toggleSavedJob(jobId, button) {
+    const wasSaved = savedJobIds.has(jobId);
+    button.disabled = true;
+    try {
+        if (wasSaved) {
+            await careerApi(`/api/saved-jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+            savedJobIds.delete(jobId);
+        } else {
+            await careerApi("/api/saved-jobs", {
+                method: "POST",
+                body: JSON.stringify({ job_id: jobId })
+            });
+            savedJobIds.add(jobId);
+        }
+        button.textContent = savedJobIds.has(jobId) ? "Saved" : "Bookmark";
+        button.setAttribute("aria-pressed", savedJobIds.has(jobId) ? "true" : "false");
+        setMessage(document.getElementById("job-board-message"), savedJobIds.has(jobId)
+            ? "Job saved to your private bookmarks."
+            : "Job removed from saved jobs.",
+            "success");
+        renderJobBoard();
+    } catch (error) {
+        setMessage(document.getElementById("job-board-message"), error.message || "Could not update saved jobs.", "error");
+        button.disabled = false;
+    }
+}
+
+function formatResponseDays(days) {
+    if (days < 1) return "less than 1 day";
+    const formatted = Number(days.toFixed(1)).toLocaleString();
+    return `${formatted} ${formatted === "1" ? "day" : "days"}`;
+}
+
+function createResponseMetricsElement(metrics, available, providerAggregate = false) {
+    const section = document.createElement("section");
+    section.className = "job-response-metrics";
+    const summary = document.createElement("p");
+    summary.className = "job-response-summary";
+    if (!available) {
+        summary.textContent = "Response data unavailable";
+    } else if (!metrics || !metrics.sufficient_data) {
+        summary.textContent = "Not enough data yet";
+    } else {
+        const responded = document.createElement("strong");
+        const responseRate = Number(metrics.response_rate.toFixed(1)).toLocaleString();
+        responded.textContent = `${responseRate}% responded`;
+        const median = document.createElement("span");
+        median.textContent = metrics.median_first_response_days === null
+            ? "No first response time recorded"
+            : `Responds in about ${formatResponseDays(metrics.median_first_response_days)}`;
+        summary.append(responded, document.createTextNode(" · "), median);
+    }
+
+    const explanation = document.createElement("details");
+    explanation.className = "job-response-explanation";
+    const explanationSummary = document.createElement("summary");
+    explanationSummary.textContent = "How this is calculated";
+    explanationSummary.title = "View the response-rate calculation and sample size";
+    const explanationText = document.createElement("p");
+    if (!available) {
+        explanationText.textContent =
+            "Response metrics are unavailable until the application status-history and Phase 26 migrations are installed.";
+    } else {
+        const scope = providerAggregate ? "your listings" : "this listing";
+        const sample = Number.isInteger(metrics?.sample_size) ? metrics.sample_size : 0;
+        explanationText.textContent =
+            `Across ${scope}, ${sample} application${sample === 1 ? "" : "s"} are in the sample. ` +
+            "Response rate is the share that reached a later stage or rejection. " +
+            "The median uses the first recorded response timestamp; withdrawn-only changes do not count. " +
+            "Metrics appear at five applications. Status history is not backfilled, so older first-response times may be unavailable.";
+    }
+    explanation.append(explanationSummary, explanationText);
+    section.append(summary, explanation);
+    return section;
+}
+
+
 function createJobCard(job, { provider = false, application = null, match = null } = {}) {
     const card = document.createElement("article");
     card.className = provider ? "provider-job-card" : "job-card";
@@ -1133,11 +1502,35 @@ function createJobCard(job, { provider = false, application = null, match = null
     });
     card.appendChild(metadata);
 
+    if (!provider) {
+        if (!application) {
+            card.appendChild(createResponseMetricsElement(
+                job.response_metrics || jobResponseMetrics.get(job.id),
+                jobResponsivenessAvailable
+            ));
+        }
+        const savedButton = document.createElement("button");
+        savedButton.type = "button";
+        savedButton.className = "secondary-button saved-job-button";
+        const saved = savedJobIds.has(job.id);
+        savedButton.textContent = saved ? "Saved" : "Bookmark";
+        savedButton.setAttribute("aria-pressed", saved ? "true" : "false");
+        savedButton.addEventListener("click", () => toggleSavedJob(job.id, savedButton));
+        card.appendChild(savedButton);
+    }
+
     if (provider) {
         const description = document.createElement("p");
         description.className = "job-card-description";
         description.textContent = job.description;
         card.appendChild(description);
+        const applicantCount = currentJobApplications.filter(
+            (item) => item.job_id === job.id
+        ).length;
+        const count = document.createElement("p");
+        count.className = "provider-listing-applicant-count";
+        count.textContent = `${applicantCount} applicant${applicantCount === 1 ? "" : "s"}`;
+        card.appendChild(count);
         const actions = document.createElement("div");
         actions.className = "job-card-actions";
         const edit = document.createElement("button");
@@ -1157,12 +1550,21 @@ function createJobCard(job, { provider = false, application = null, match = null
         });
         statusSelect.addEventListener("change", () => updateJobStatus(job.id, statusSelect.value, statusSelect));
         actions.appendChild(statusSelect);
+        const duplicate = document.createElement("button");
+        duplicate.className = "secondary-button";
+        duplicate.type = "button";
+        duplicate.textContent = "Duplicate";
+        duplicate.addEventListener("click", () => duplicateJobListing(job.id, duplicate));
+        actions.appendChild(duplicate);
         card.appendChild(actions);
         return card;
     }
 
     if (matchDetails) {
         card.appendChild(createJobMatchDetails(job, matchDetails));
+        if (!provider && !application) {
+            card.appendChild(createJobWhatIfPanel(job));
+        }
     }
     const tailorButton = document.createElement("button");
     tailorButton.type = "button";
@@ -1180,6 +1582,57 @@ function createJobCard(job, { provider = false, application = null, match = null
         applicationDate.className = "job-application-date";
         applicationDate.textContent = `Applied ${formatApplicationDate(application.created_at.slice(0, 10))}`;
         card.append(applicationDate);
+        const timeline = document.createElement("details");
+        timeline.className = "application-status-timeline";
+        const timelineSummary = document.createElement("summary");
+        timelineSummary.textContent = "Status timeline";
+        const timelineContent = document.createElement("div");
+        timelineContent.className = "application-status-timeline-content";
+        timeline.append(timelineSummary, timelineContent);
+        timeline.addEventListener("toggle", () => {
+            if (!timeline.open || timeline.dataset.loaded === "true" || timeline.dataset.loading === "true") {
+                return;
+            }
+            timeline.dataset.loading = "true";
+            loadApplicationStatusTimeline(application, timelineContent, timeline)
+                .finally(() => {
+                    delete timeline.dataset.loading;
+                });
+        });
+        card.appendChild(timeline);
+        if (application.status === "Rejected") {
+            const rejectionCard = document.createElement("section");
+            rejectionCard.className = "application-rejection-card";
+            const rejectionHeading = document.createElement("h3");
+            rejectionHeading.textContent = "Application update";
+            const rejectionMessage = document.createElement("p");
+            rejectionMessage.textContent =
+                "The provider marked this application as rejected. This decision applies to this role and is not a measure of your overall ability.";
+            rejectionCard.append(rejectionHeading, rejectionMessage);
+            const feedbackDetails = document.createElement("details");
+            feedbackDetails.className = "application-rejection-feedback";
+            const feedbackSummary = document.createElement("summary");
+            feedbackSummary.textContent = "Rejection reason and shared note";
+            const feedbackContent = document.createElement("div");
+            feedbackContent.className = "application-rejection-feedback-content";
+            feedbackDetails.append(feedbackSummary, feedbackContent);
+            feedbackDetails.addEventListener("toggle", () => {
+                if (
+                    !feedbackDetails.open
+                    || feedbackDetails.dataset.loaded === "true"
+                    || feedbackDetails.dataset.loading === "true"
+                ) {
+                    return;
+                }
+                feedbackDetails.dataset.loading = "true";
+                loadApplicationRejectionFeedback(application, feedbackContent, feedbackDetails)
+                    .finally(() => {
+                        delete feedbackDetails.dataset.loading;
+                    });
+            });
+            rejectionCard.appendChild(feedbackDetails);
+            card.appendChild(rejectionCard);
+        }
         if (!["Hired", "Rejected", "Withdrawn"].includes(application.status)) {
             const withdraw = document.createElement("button");
             withdraw.className = "secondary-button withdraw-application-button";
@@ -1215,15 +1668,193 @@ function createJobCard(job, { provider = false, application = null, match = null
     return card;
 }
 
+async function loadApplicationStatusTimeline(application, container, timeline) {
+    container.replaceChildren();
+    const loading = document.createElement("p");
+    loading.textContent = "Loading status history...";
+    container.appendChild(loading);
+    try {
+        const result = await careerApi(
+            `/api/job-applications/${encodeURIComponent(application.id)}/timeline`
+        );
+        const events = Array.isArray(result.events) ? result.events : [];
+        const list = document.createElement("ol");
+        list.className = "application-status-timeline-list";
+        const hasSubmissionEvent = events.some(
+            (event) => event.from_status === null && event.to_status === "Submitted"
+        );
+        if (!hasSubmissionEvent && result.submitted_at) {
+            list.appendChild(createStatusTimelineItem(
+                "Application submitted",
+                result.submitted_at
+            ));
+        }
+        events.forEach((event) => {
+            const label = event.from_status
+                ? `${event.from_status} -> ${event.to_status}`
+                : `Application submitted (${event.to_status})`;
+            list.appendChild(createStatusTimelineItem(label, event.changed_at));
+        });
+        if (!list.childElementCount) {
+            const empty = document.createElement("li");
+            empty.textContent = "No status events are available.";
+            list.appendChild(empty);
+        }
+        const content = [list];
+        if (!result.history_complete) {
+            const note = document.createElement("p");
+            note.className = "muted-text";
+            note.textContent =
+                "Earlier status changes were not recorded. The current stage is " +
+                `${result.current_status}; its change time is unavailable unless shown above.`;
+            content.push(note);
+        }
+        container.replaceChildren(...content);
+        timeline.dataset.loaded = "true";
+        return true;
+    } catch (error) {
+        const message = document.createElement("p");
+        message.className = "form-message error";
+        message.setAttribute("role", "alert");
+        message.textContent = error.message || "Could not load status history.";
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "secondary-button";
+        retry.textContent = "Try again";
+        retry.addEventListener("click", () => {
+            delete timeline.dataset.loaded;
+            loadApplicationStatusTimeline(application, container, timeline);
+        });
+        container.replaceChildren(message, retry);
+        return false;
+    }
+}
+
+async function loadApplicationRejectionFeedback(application, container, details) {
+    container.replaceChildren();
+    const loading = document.createElement("p");
+    loading.textContent = "Loading provider feedback...";
+    container.appendChild(loading);
+    try {
+        const result = await careerApi(
+            `/api/job-applications/${encodeURIComponent(application.id)}/rejection-feedback`
+        );
+        if (!result.feedback) {
+            const empty = document.createElement("p");
+            empty.textContent = "The provider has not shared structured rejection details.";
+            container.replaceChildren(empty);
+        } else {
+            const feedback = result.feedback;
+            const content = [];
+            if (feedback.rejection_reason) {
+                const reason = document.createElement("p");
+                reason.className = "rejection-reason";
+                reason.textContent = `Reason: ${
+                    rejectionFeedbackReasons.find(
+                        ([value]) => value === feedback.rejection_reason
+                    )?.[1] || "Other"
+                }`;
+                content.push(reason);
+            } else {
+                const unavailable = document.createElement("p");
+                unavailable.textContent = "A structured reason is not available for this application.";
+                content.push(unavailable);
+            }
+            if (feedback.rejection_note) {
+                const note = document.createElement("p");
+                note.textContent = feedback.rejection_note;
+                content.push(note);
+            }
+            if (feedback.rejection_reason === "skills_gap") {
+                const skillGapLink = document.createElement("a");
+                skillGapLink.href = "#skills-workspace";
+                skillGapLink.textContent = "Review your skill gap for this role";
+                skillGapLink.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    openSkillGapForRejectedApplication(feedback, application);
+                });
+                content.push(skillGapLink);
+            }
+            const limitation = document.createElement("p");
+            limitation.className = "muted-text";
+            limitation.textContent =
+                "Provider-selected feedback is not independently verified and is not a measure of your ability.";
+            content.push(limitation);
+            container.replaceChildren(...content);
+        }
+        details.dataset.loaded = "true";
+        return true;
+    } catch (error) {
+        const message = document.createElement("p");
+        message.className = "form-message error";
+        message.setAttribute("role", "alert");
+        message.textContent = error.message || "Could not load provider feedback.";
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "secondary-button";
+        retry.textContent = "Try again";
+        retry.addEventListener("click", () => {
+            delete details.dataset.loaded;
+            loadApplicationRejectionFeedback(application, container, details);
+        });
+        container.replaceChildren(message, retry);
+        return false;
+    }
+}
+
+function createStatusTimelineItem(label, timestamp) {
+    const item = document.createElement("li");
+    const status = document.createElement("span");
+    status.textContent = label;
+    const time = document.createElement("time");
+    time.dateTime = timestamp;
+    time.textContent = formatApplicationTimelineTimestamp(timestamp);
+    item.append(status, time);
+    return item;
+}
+
+function formatApplicationTimelineTimestamp(value) {
+    const timestamp = new Date(value);
+    return Number.isNaN(timestamp.getTime())
+        ? "Time unavailable"
+        : timestamp.toLocaleString(undefined, {
+            dateStyle: "medium",
+            timeStyle: "short"
+        });
+}
+
 function renderProviderJobs() {
     const list = document.getElementById("provider-job-list");
     list.replaceChildren();
-    if (!currentJobListings.length) {
+    const statusFilter = document.getElementById("provider-listing-status-filter").value;
+    const filtered = currentJobListings.filter((job) =>
+        statusFilter === "all" || job.status === statusFilter
+    );
+    if (!filtered.length) {
+        if (currentJobListings.length) {
+            list.appendChild(createEmptyState("No listings in this status", "Choose another status to see your job listings."));
+            updateProviderJobFilter();
+            return;
+        }
         list.appendChild(createEmptyState("Your first role starts here", "Create a listing to introduce your opportunity to job seekers."));
     } else {
-        currentJobListings.forEach((job) => list.appendChild(createJobCard(job, { provider: true })));
+        filtered.forEach((job) => list.appendChild(createJobCard(job, { provider: true })));
     }
     updateProviderJobFilter();
+}
+
+async function duplicateJobListing(jobId, button) {
+    button.disabled = true;
+    try {
+        await careerApi(`/api/provider/job-listings/${encodeURIComponent(jobId)}/duplicate`, {
+            method: "POST"
+        });
+        await loadProviderWorkspace();
+        setMessage(document.getElementById("provider-jobs-message"), "Listing duplicated as a draft.", "success");
+    } catch (error) {
+        setMessage(document.getElementById("provider-jobs-message"), error.message || "Could not duplicate this listing.", "error");
+        button.disabled = false;
+    }
 }
 
 function updateProviderJobFilter() {
@@ -1236,49 +1867,72 @@ function updateProviderJobFilter() {
 
 function renderProviderApplicants() {
     const list = document.getElementById("provider-applicant-board");
-    const recent = document.getElementById("provider-recent-applicants");
     const jobId = document.getElementById("provider-job-filter").value;
     const statusFilter = document.getElementById("provider-applicant-filter").value;
+    const query = document.getElementById("provider-applicant-search").value.trim().toLocaleLowerCase();
     const filtered = currentJobApplications.filter((application) =>
         (jobId === "all" || application.job_id === jobId)
         && (statusFilter === "all" || application.status === statusFilter)
+        && (!query || [
+            application.applicant_name,
+            application.applicant_email,
+            application.job_listings?.title,
+            application.job_listings?.company
+        ].filter(Boolean).join(" ").toLocaleLowerCase().includes(query))
     );
     filtered.sort((first, second) => {
-        const firstScore = currentApplicantMatches.get(first.id)?.score;
-        const secondScore = currentApplicantMatches.get(second.id)?.score;
-        return (secondScore ?? -1) - (firstScore ?? -1);
+        return String(second.created_at || "").localeCompare(String(first.created_at || ""));
     });
     list.replaceChildren();
     if (!filtered.length) {
         list.appendChild(createEmptyState("No applicants to show", "Applications appear here when someone applies to one of your published jobs."));
         return;
     }
+    const table = document.createElement("table");
+    table.className = "provider-applicant-table";
+    const head = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    ["Applicant", "Listing", "Applied", "Skill evidence alignment", "Stage", "Interview and private notes"].forEach((label) => {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = label;
+        headerRow.appendChild(cell);
+    });
+    head.appendChild(headerRow);
+    const body = document.createElement("tbody");
     filtered.forEach((application) => {
-        const card = document.createElement("article");
-        card.className = "provider-applicant-card";
-        const details = document.createElement("div");
-        details.className = "provider-applicant-details";
+        const row = document.createElement("tr");
+        row.className = "provider-applicant-row";
+        const details = document.createElement("td");
         const name = document.createElement("h3");
         name.textContent = application.applicant_name;
         const email = document.createElement("a");
         email.href = `mailto:${application.applicant_email}`;
         email.textContent = application.applicant_email;
-        const role = document.createElement("p");
-        role.textContent = `${application.job_listings?.title || "Job listing"} · ${application.job_listings?.company || ""}`;
-        const note = document.createElement("p");
-        note.className = "provider-cover-note";
-        note.textContent = application.cover_note || "No message included.";
-        details.append(name, email, role, note);
+        details.append(name, email);
+        const listing = document.createElement("td");
+        listing.textContent = `${application.job_listings?.title || "Job listing"} · ${application.job_listings?.company || ""}`;
+        const applied = document.createElement("td");
+        applied.textContent = formatApplicationDate(application.created_at.slice(0, 10));
+        const evidence = document.createElement("td");
         const match = currentApplicantMatches.get(application.id);
         if (match) {
             const matchScore = document.createElement("span");
             matchScore.className = "job-match-score";
             matchScore.textContent = match.score === null
                 ? "Alignment unavailable"
-                : `${match.score}/100 evidence alignment`;
-            details.appendChild(matchScore);
-            details.appendChild(createApplicantMatchDetails(match));
+                : `${match.score}/100 alignment · not a hiring score`;
+            evidence.append(matchScore, createApplicantMatchDetails(match));
+        } else {
+            evidence.textContent = "Evidence unavailable";
         }
+        const applicantContext = document.createElement("details");
+        const contextSummary = document.createElement("summary");
+        contextSummary.textContent = "Application details";
+        const note = document.createElement("p");
+        note.className = "provider-cover-note";
+        note.textContent = application.cover_note || "No message included.";
+        applicantContext.append(contextSummary, note);
         const resume = document.createElement("button");
         resume.type = "button";
         resume.className = "secondary-button applicant-resume-button";
@@ -1287,27 +1941,35 @@ function renderProviderApplicants() {
         if (application.resume_path) {
             resume.addEventListener("click", () => openApplicantResume(application, resume));
         }
-        details.appendChild(resume);
+        applicantContext.appendChild(resume);
+        details.appendChild(applicantContext);
+        const stage = document.createElement("td");
         const status = document.createElement("select");
         status.setAttribute("aria-label", `Application status for ${application.applicant_name}`);
         ["Submitted", "CV review", "Shortlisted", "Interview", "Offer", "Hired", "Rejected"].forEach((value) => {
             const option = new Option(value, value, false, value === application.status);
             status.appendChild(option);
         });
+        if (application.status === "Withdrawn") {
+            const withdrawn = new Option("Withdrawn", "Withdrawn", true, true);
+            withdrawn.disabled = true;
+            status.add(withdrawn);
+        }
         status.addEventListener("change", () => updateJobApplicationStatus(application.id, status.value, status));
-        const date = document.createElement("small");
-        date.textContent = formatApplicationDate(application.created_at.slice(0, 10));
+        stage.appendChild(status);
+        const reviewCell = document.createElement("td");
         const review = currentApplicationReviews.get(application.id);
         const reviewPanel = document.createElement("div");
         reviewPanel.className = "applicant-review-panel";
-        const reviewHeading = document.createElement("strong");
-        reviewHeading.textContent = "Private hiring notes";
         const interviewLabel = document.createElement("label");
         interviewLabel.textContent = "Interview date (optional)";
         const interviewInput = document.createElement("input");
         interviewInput.type = "datetime-local";
         interviewInput.setAttribute("aria-label", `Interview date for ${application.applicant_name}`);
         interviewInput.value = review?.interview_at ? toLocalDateTimeValue(review.interview_at) : "";
+        interviewInput.disabled = currentInterviewSlots.some(
+            (slot) => slot.application_id === application.id && slot.status === "booked"
+        );
         interviewLabel.appendChild(interviewInput);
         const notesLabel = document.createElement("label");
         notesLabel.textContent = "Reviewer notes (only visible to your hiring team)";
@@ -1320,27 +1982,135 @@ function renderProviderApplicants() {
         const saveReview = document.createElement("button");
         saveReview.type = "button";
         saveReview.className = "secondary-button";
-        saveReview.textContent = "Save review notes";
+        saveReview.textContent = "Save interview date and notes";
         saveReview.addEventListener("click", () => saveApplicationReview(application.id, notesInput, interviewInput, saveReview));
-        reviewPanel.append(reviewHeading, interviewLabel, notesLabel, saveReview);
-        card.append(details, status, date, reviewPanel);
-        list.appendChild(card);
+        const calendarButton = document.createElement("button");
+        calendarButton.type = "button";
+        calendarButton.className = "secondary-button";
+        calendarButton.dataset.interviewCalendar = "true";
+        calendarButton.textContent = "Add interview to calendar (.ics)";
+        calendarButton.hidden = !review?.interview_at;
+        calendarButton.addEventListener("click", () => downloadInterviewCalendar(
+            application.id,
+            calendarButton,
+            "provider-applicants-message"
+        ));
+        const slotsPanel = document.createElement("details");
+        slotsPanel.className = "interview-slots-panel";
+        const slotsSummary = document.createElement("summary");
+        slotsSummary.textContent = "Manage bookable interview times";
+        slotsPanel.appendChild(slotsSummary);
+        const slotsInputLabel = document.createElement("label");
+        slotsInputLabel.textContent = "Offer a new 30-minute time (your local time)";
+        const slotsInput = document.createElement("input");
+        slotsInput.type = "datetime-local";
+        slotsInput.id = `interview-slot-${application.id}`;
+        slotsInputLabel.htmlFor = slotsInput.id;
+        slotsInputLabel.appendChild(slotsInput);
+        const addSlot = document.createElement("button");
+        addSlot.type = "button";
+        addSlot.className = "secondary-button";
+        addSlot.dataset.addInterviewSlot = "true";
+        addSlot.textContent = "Offer 30-minute time";
+        addSlot.disabled = Boolean(review?.interview_at)
+            || ["Hired", "Rejected", "Withdrawn"].includes(application.status);
+        addSlot.addEventListener("click", () => addProviderInterviewSlot(
+            application.id,
+            slotsInput,
+            addSlot
+        ));
+        const slotsList = document.createElement("div");
+        slotsList.className = "interview-slot-list";
+        const applicationSlots = currentInterviewSlots.filter(
+            (slot) => slot.application_id === application.id
+        );
+        if (review?.interview_at) {
+            const existingDate = document.createElement("p");
+            existingDate.className = "muted-text";
+            existingDate.textContent = "Clear the existing interview date before offering bookable times.";
+            slotsPanel.appendChild(existingDate);
+        }
+        if (!applicationSlots.length) {
+            const emptySlots = document.createElement("p");
+            emptySlots.className = "muted-text";
+            emptySlots.textContent = "No bookable time slots yet.";
+            slotsList.appendChild(emptySlots);
+        } else {
+            applicationSlots.forEach((slot) => {
+                const slotRow = document.createElement("div");
+                slotRow.className = "interview-slot-row";
+                const slotText = document.createElement("span");
+                slotText.textContent = `${formatInterviewSlotTime(slot.starts_at)} · ${slot.status}`;
+                slotRow.appendChild(slotText);
+                if (slot.status === "available" || slot.status === "booked") {
+                    const cancelSlot = document.createElement("button");
+                    cancelSlot.type = "button";
+                    cancelSlot.className = "text-button";
+                    cancelSlot.textContent = slot.status === "booked" ? "Cancel booked time" : "Remove time";
+                    cancelSlot.addEventListener("click", () => updateProviderInterviewSlot(
+                        slot,
+                        cancelSlot
+                    ));
+                    slotRow.appendChild(cancelSlot);
+                }
+                slotsList.appendChild(slotRow);
+            });
+        }
+        slotsPanel.append(slotsInputLabel, addSlot, slotsList);
+        reviewPanel.append(interviewLabel, notesLabel, saveReview, calendarButton, slotsPanel);
+        if (application.status === "Rejected") {
+            const savedFeedback = currentApplicationRejectionFeedback.get(application.id);
+            const rejectionDetails = document.createElement("details");
+            rejectionDetails.className = "provider-rejection-details";
+            const summary = document.createElement("summary");
+            summary.textContent = "Rejection details";
+            const reason = document.createElement("p");
+            reason.textContent = `Reason: ${
+                rejectionFeedbackReasons.find(
+                    ([value]) => value === savedFeedback?.rejection_reason
+                )?.[1] || "Not available"
+            }`;
+            const sharing = document.createElement("p");
+            sharing.textContent = savedFeedback?.rejection_note_shared
+                ? "The note is shared with the applicant."
+                : "The note is private to your hiring team.";
+            rejectionDetails.append(summary, reason, sharing);
+            if (savedFeedback?.rejection_note) {
+                const note = document.createElement("p");
+                note.textContent = savedFeedback.rejection_note;
+                rejectionDetails.appendChild(note);
+            }
+            reviewPanel.appendChild(rejectionDetails);
+            const editRejection = document.createElement("button");
+            editRejection.type = "button";
+            editRejection.className = "secondary-button";
+            editRejection.textContent = "Edit rejection details";
+            editRejection.addEventListener("click", () => {
+                openProviderRejectionDialog(application, status);
+            });
+            stage.appendChild(editRejection);
+        }
+        reviewCell.appendChild(reviewPanel);
+        row.append(details, listing, applied, evidence, stage, reviewCell);
+        body.appendChild(row);
     });
+    table.append(head, body);
+    list.appendChild(table);
 }
 
 function createApplicantMatchDetails(match) {
     const details = document.createElement("details");
     details.className = "job-match-details applicant-match-details";
     const summary = document.createElement("summary");
-    summary.textContent = "View evidence breakdown";
+    summary.textContent = "View required vs preferred evidence";
     details.appendChild(summary);
     const explanation = document.createElement("div");
     explanation.className = "job-match-explanation";
     const score = document.createElement("p");
     score.className = "job-match-score-explanation";
     score.textContent = match.score === null
-        ? "No alignment score is shown because the applicant has no saved profile evidence for recognized requirements."
-        : `Evidence alignment: ${match.score}/100. Required skills carry 80% and preferred skills 20% when both groups are present.`;
+        ? "No alignment indicator is available because this profile has no evidence for recognized requirements. This is not a hiring score."
+        : `Evidence alignment: ${match.score}/100. Required skills carry 80% and preferred skills 20% when both groups are present. This transparent indicator is not a hiring score, competence assessment, or hiring recommendation.`;
     explanation.append(
         score,
         createMatchSkillList("Required skills", match.required_skills || []),
@@ -1386,6 +2156,98 @@ function toLocalDateTimeValue(value) {
     return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
 
+function formatInterviewSlotTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "Time unavailable";
+    return date.toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short"
+    });
+}
+
+async function addProviderInterviewSlot(applicationId, input, button) {
+    const start = new Date(input.value);
+    if (!input.value || Number.isNaN(start.getTime())) {
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            "Choose a valid interview time.",
+            "error"
+        );
+        return;
+    }
+    button.disabled = true;
+    try {
+        const result = await careerApi(
+            `/api/provider/job-applications/${encodeURIComponent(applicationId)}/interview-slots`,
+            {
+                method: "POST",
+                body: JSON.stringify({ starts_at: start.toISOString() })
+            }
+        );
+        if (result.slot) currentInterviewSlots.push(result.slot);
+        renderProviderWorkspace();
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            "30-minute interview time offered.",
+            "success"
+        );
+    } catch (error) {
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            error.message || "Could not offer this interview time.",
+            "error"
+        );
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function updateProviderInterviewSlot(slot, button) {
+    const booked = slot.status === "booked";
+    const action = booked ? "Cancel this booked interview time?" : "Remove this available interview time?";
+    if (!window.confirm(action)) return;
+    button.disabled = true;
+    try {
+        if (booked) {
+            const result = await careerApi(
+                `/api/provider/interview-slots/${encodeURIComponent(slot.id)}/cancel`,
+                { method: "POST" }
+            );
+            currentInterviewSlots = currentInterviewSlots.map((item) =>
+                item.id === slot.id ? result.slot : item
+            );
+            const review = currentApplicationReviews.get(slot.application_id);
+            if (review?.interview_at) {
+                currentApplicationReviews.set(slot.application_id, {
+                    ...review,
+                    interview_at: null
+                });
+            }
+            await loadNotifications();
+        } else {
+            await careerApi(
+                `/api/provider/interview-slots/${encodeURIComponent(slot.id)}`,
+                { method: "DELETE" }
+            );
+            currentInterviewSlots = currentInterviewSlots.filter((item) => item.id !== slot.id);
+        }
+        renderProviderWorkspace();
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            booked ? "Booked interview time cancelled." : "Available interview time removed.",
+            "success"
+        );
+    } catch (error) {
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            error.message || "Could not update this interview time.",
+            "error"
+        );
+    } finally {
+        button.disabled = false;
+    }
+}
+
 async function saveApplicationReview(applicationId, notesInput, interviewInput, button) {
     const previousLabel = button.textContent;
     button.disabled = true;
@@ -1403,7 +2265,21 @@ async function saveApplicationReview(applicationId, notesInput, interviewInput, 
             reviewer_notes: notesInput.value.trim(),
             interview_at: interviewInput.value ? new Date(interviewInput.value).toISOString() : null
         });
-        setMessage(document.getElementById("provider-applicants-message"), "Private review notes saved.", "success");
+        const calendarButton = button.parentElement.querySelector("[data-interview-calendar]");
+        if (calendarButton) calendarButton.hidden = !interviewInput.value;
+        const addSlotButton = button.parentElement.querySelector("[data-add-interview-slot]");
+        const application = currentJobApplications.find((item) => item.id === applicationId);
+        if (addSlotButton) {
+            addSlotButton.disabled = Boolean(interviewInput.value)
+                || ["Hired", "Rejected", "Withdrawn"].includes(application?.status);
+        }
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            interviewInput.value
+                ? "Interview date and private reviewer notes saved."
+                : "Private reviewer notes saved.",
+            "success"
+        );
         await loadNotifications();
     } catch (error) {
         setMessage(document.getElementById("provider-applicants-message"), supabaseErrorMessage(error), "error");
@@ -1417,16 +2293,30 @@ function renderJobBoard() {
     const list = document.getElementById("job-board-list");
     const query = document.getElementById("job-search").value.trim().toLocaleLowerCase();
     const type = document.getElementById("job-type-filter").value;
+    const locationQuery = document.getElementById("job-location-filter").value.trim().toLocaleLowerCase();
+    const matchLevel = document.getElementById("job-match-filter").value;
     const sort = document.getElementById("job-sort").value;
     const appliedIds = new Set(seekerApplications.map((application) => application.job_id));
-    const filtered = currentJobListings.filter((job) =>
-        (type === "all" || job.employment_type === type)
-        && (!query || `${job.title} ${job.company} ${job.location} ${job.description} ${job.requirements}`
-            .toLocaleLowerCase().includes(query))
-    );
+    const filtered = currentJobListings.filter((job) => {
+        const score = jobMatches.get(job.id)?.score;
+        let matchesLevel = true;
+        if (matchLevel === "strong") matchesLevel = typeof score === "number" && score >= 75;
+        if (matchLevel === "moderate") matchesLevel = typeof score === "number" && score >= 40 && score < 75;
+        if (matchLevel === "limited") matchesLevel = typeof score === "number" && score < 40;
+        if (matchLevel === "unavailable") matchesLevel = score === null || score === undefined;
+        if (matchLevel === "saved") matchesLevel = savedJobIds.has(job.id);
+        return (type === "all" || job.employment_type === type)
+            && (!locationQuery || String(job.location || "").toLocaleLowerCase().includes(locationQuery))
+            && matchesLevel
+            && (!query || `${job.title} ${job.company} ${job.location} ${job.description} ${job.requirements}`
+                .toLocaleLowerCase().includes(query));
+    });
     filtered.sort((first, second) => {
         if (sort === "newest") {
             return String(second.created_at || "").localeCompare(String(first.created_at || ""));
+        }
+        if (sort === "company") {
+            return String(first.company || "").localeCompare(String(second.company || ""));
         }
         const firstScore = jobMatches.get(first.id)?.score;
         const secondScore = jobMatches.get(second.id)?.score;
@@ -1464,9 +2354,127 @@ function renderSeekerApplications() {
     }
     seekerApplications.forEach((application) => {
         const job = { title: application.job_title, company: application.company };
-        list.appendChild(createJobCard(job, { application }));
+        const card = createJobCard(job, { application });
+        card.appendChild(createSeekerInterviewSlots(application));
+        list.appendChild(card);
     });
     renderJobBoard();
+}
+
+function createSeekerInterviewSlots(application) {
+    const section = document.createElement("section");
+    section.className = "seeker-interview-slots";
+    const heading = document.createElement("h3");
+    heading.textContent = "Interview times";
+    section.appendChild(heading);
+    if (["Hired", "Rejected", "Withdrawn"].includes(application.status)) {
+        const unavailable = document.createElement("p");
+        unavailable.className = "muted-text";
+        unavailable.textContent = "Interview booking is unavailable for this application stage.";
+        section.appendChild(unavailable);
+        return section;
+    }
+
+    const slots = currentInterviewSlots.filter(
+        (slot) => slot.application_id === application.id
+    );
+    const booked = slots.find((slot) => slot.status === "booked");
+    if (booked) {
+        const bookedText = document.createElement("p");
+        bookedText.textContent = `Booked: ${formatInterviewSlotTime(booked.starts_at)} (30 minutes)`;
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "text-button";
+        cancel.textContent = "Cancel interview";
+        cancel.addEventListener("click", () => cancelApplicantInterviewSlot(booked, cancel));
+        section.append(bookedText, cancel);
+        return section;
+    }
+
+    const available = slots.filter((slot) => slot.status === "available");
+    if (!available.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted-text";
+        empty.textContent = "No interview times are currently available.";
+        section.appendChild(empty);
+        return section;
+    }
+
+    const slotList = document.createElement("div");
+    slotList.className = "seeker-interview-slot-list";
+    available.forEach((slot) => {
+        const row = document.createElement("div");
+        row.className = "interview-slot-row";
+        const time = document.createElement("span");
+        time.textContent = `${formatInterviewSlotTime(slot.starts_at)} · 30 minutes`;
+        const book = document.createElement("button");
+        book.type = "button";
+        book.className = "secondary-button";
+        book.textContent = "Book this time";
+        book.addEventListener("click", () => bookApplicantInterviewSlot(slot, book));
+        row.append(time, book);
+        slotList.appendChild(row);
+    });
+    section.appendChild(slotList);
+    return section;
+}
+
+async function bookApplicantInterviewSlot(slot, button) {
+    button.disabled = true;
+    try {
+        const result = await careerApi(
+            `/api/job-applications/interview-slots/${encodeURIComponent(slot.id)}/book`,
+            { method: "POST" }
+        );
+        currentInterviewSlots = currentInterviewSlots.map((item) =>
+            item.id === slot.id ? result.slot : item
+        );
+        renderSeekerApplications();
+        await loadNotifications();
+        setMessage(
+            document.getElementById("my-job-applications-message"),
+            "Interview time booked. A calendar download is available in Notifications.",
+            "success"
+        );
+    } catch (error) {
+        await loadSeekerApplications();
+        setMessage(
+            document.getElementById("my-job-applications-message"),
+            error.message || "Could not book this interview time.",
+            "error"
+        );
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function cancelApplicantInterviewSlot(slot, button) {
+    if (!window.confirm("Cancel this interview? The provider will be notified.")) return;
+    button.disabled = true;
+    try {
+        const result = await careerApi(
+            `/api/job-applications/interview-slots/${encodeURIComponent(slot.id)}/cancel`,
+            { method: "POST" }
+        );
+        currentInterviewSlots = currentInterviewSlots.map((item) =>
+            item.id === slot.id ? result.slot : item
+        );
+        renderSeekerApplications();
+        await loadNotifications();
+        setMessage(
+            document.getElementById("my-job-applications-message"),
+            "Interview cancelled. The provider has been notified.",
+            "success"
+        );
+    } catch (error) {
+        setMessage(
+            document.getElementById("my-job-applications-message"),
+            error.message || "Could not cancel this interview.",
+            "error"
+        );
+    } finally {
+        button.disabled = false;
+    }
 }
 
 async function withdrawJobApplication(application, button) {
@@ -1509,14 +2517,60 @@ function openJobDialog(job = null) {
     jobDialog.showModal();
 }
 
-function openJobApplication(job) {
+async function loadResumeVersions() {
+    const { data, error } = await supabaseClient
+        .from("resume_versions")
+        .select("id,label,storage_path,created_at")
+        .order("created_at", { ascending: false })
+        .limit(100);
+    if (error) throw error;
+    currentResumeVersions = Array.isArray(data) ? data : [];
+}
+
+function updateResumeVersionInputs() {
+    const savedVersion = Boolean(document.getElementById("resume-version-select").value);
+    const fileInput = document.getElementById("candidate-resume");
+    const labelInput = document.getElementById("resume-version-label");
+    fileInput.required = !savedVersion;
+    fileInput.disabled = savedVersion;
+    labelInput.disabled = savedVersion;
+}
+
+async function openJobApplication(job) {
     applyingToJobId = job.id;
     jobApplicationForm.reset();
+    setMessage(document.getElementById("job-application-message"), "");
+    const versionSelect = document.getElementById("resume-version-select");
+    versionSelect.replaceChildren(new Option("Upload and save a new résumé version", ""));
+    try {
+        await loadResumeVersions();
+        currentResumeVersions.forEach((version) => {
+            const label = version.label
+                ? `${version.label} · ${formatApplicationTimelineTimestamp(version.created_at)}`
+                : `Résumé · ${formatApplicationTimelineTimestamp(version.created_at)}`;
+            versionSelect.add(new Option(label, version.id));
+        });
+        setMessage(document.getElementById("job-application-message"), "");
+    } catch (error) {
+        currentResumeVersions = [];
+        setMessage(
+            document.getElementById("job-application-message"),
+            supabaseErrorMessage(error),
+            "error"
+        );
+    }
+    updateResumeVersionInputs();
     document.getElementById("job-application-title").textContent = `Apply: ${job.title}`;
+    const responseMetrics = document.getElementById("job-application-response-metrics");
+    responseMetrics.replaceChildren(
+        createResponseMetricsElement(
+            job.response_metrics || jobResponseMetrics.get(job.id),
+            jobResponsivenessAvailable
+        )
+    );
     document.getElementById("candidate-name").value =
         currentUser?.user_metadata?.full_name || "";
     document.getElementById("candidate-email").value = currentUser?.email || "";
-    setMessage(document.getElementById("job-application-message"), "");
     jobApplicationDialog.showModal();
 }
 
@@ -1544,15 +2598,22 @@ async function saveJobListing(event) {
 }
 
 async function updateJobStatus(id, status, control) {
+    const previous = currentJobListings.find((job) => job.id === id)?.status || "draft";
     control.disabled = true;
     try {
-        const { error } = await supabaseClient.from("job_listings").update({ status }).eq("id", id);
-        if (error) throw error;
+        await careerApi(`/api/provider/job-listings/${encodeURIComponent(id)}/status`, {
+            method: "PATCH",
+            body: JSON.stringify({ status })
+        });
         await loadProviderWorkspace();
-        setMessage(document.getElementById("provider-jobs-message"), "Listing status updated.", "success");
+        setMessage(
+            document.getElementById("provider-jobs-message"),
+            `Listing status changed from ${previous} to ${status}.`,
+            "success"
+        );
     } catch (error) {
         setMessage(document.getElementById("provider-jobs-message"), supabaseErrorMessage(error), "error");
-        control.value = currentJobListings.find((job) => job.id === id)?.status || "draft";
+        control.value = previous;
     } finally {
         control.disabled = false;
     }
@@ -1565,18 +2626,29 @@ async function submitJobApplication(event) {
     button.disabled = true;
     const values = new FormData(jobApplicationForm);
     const resumeFile = values.get("resume");
-    if (!(resumeFile instanceof File) || !resumeFile.name) {
-        setMessage(document.getElementById("job-application-message"), "Choose your résumé as a PDF before applying.", "error");
+    const selectedVersionId = String(values.get("resume_version_id") || "");
+    const selectedVersion = selectedVersionId
+        ? currentResumeVersions.find((version) => version.id === selectedVersionId)
+        : null;
+    if (selectedVersionId && !selectedVersion) {
+        setMessage(document.getElementById("job-application-message"), "Choose an available saved résumé version or upload a new one.", "error");
         button.disabled = false;
         return;
     }
-    if (resumeFile.size > maxResumeBytes) {
+    if (!selectedVersion && (!(resumeFile instanceof File) || !resumeFile.name)) {
+        setMessage(document.getElementById("job-application-message"), "Choose a saved résumé version or upload a PDF before applying.", "error");
+        button.disabled = false;
+        return;
+    }
+    if (!selectedVersion && resumeFile.size > maxResumeBytes) {
         setMessage(document.getElementById("job-application-message"), `The résumé PDF must be ${Math.floor(maxResumeBytes / 1024 / 1024)} MB or smaller.`, "error");
         button.disabled = false;
         return;
     }
-    if (!resumeFile.name.toLowerCase().endsWith(".pdf")
-        || (resumeFile.type && resumeFile.type !== "application/pdf")) {
+    if (!selectedVersion && (
+        !resumeFile.name.toLowerCase().endsWith(".pdf")
+        || (resumeFile.type && resumeFile.type !== "application/pdf")
+    )) {
         setMessage(document.getElementById("job-application-message"), "Upload a PDF résumé file.", "error");
         button.disabled = false;
         return;
@@ -1599,30 +2671,53 @@ async function submitJobApplication(event) {
         applicant_email: String(values.get("applicant_email") || "").trim(),
         cover_note: String(values.get("cover_note") || "").trim()
     };
-    const resumePath = `${currentUser.id}/${applyingToJobId}/${crypto.randomUUID()}.pdf`;
+    let resumePath = selectedVersion?.storage_path || "";
+    let resumeVersionId = selectedVersion?.id || null;
+    let createdVersion = false;
     try {
-        const signature = new TextDecoder().decode(await resumeFile.slice(0, 5).arrayBuffer());
-        if (signature !== "%PDF-") {
-            throw new Error("This file does not appear to be a valid PDF.");
-        }
-        setMessage(document.getElementById("job-application-message"), "Uploading your résumé...");
-        const upload = await supabaseClient.storage
-            .from("application-resumes")
-            .upload(resumePath, resumeFile, {
-                cacheControl: "300",
-                contentType: "application/pdf",
-                upsert: false
+        if (!selectedVersion) {
+            const signature = new TextDecoder().decode(await resumeFile.slice(0, 5).arrayBuffer());
+            if (signature !== "%PDF-") {
+                throw new Error("This file does not appear to be a valid PDF.");
+            }
+            resumeVersionId = crypto.randomUUID();
+            resumePath = `${currentUser.id}/versions/${resumeVersionId}.pdf`;
+            setMessage(document.getElementById("job-application-message"), "Saving your résumé version privately...");
+            const upload = await supabaseClient.storage
+                .from("application-resumes")
+                .upload(resumePath, resumeFile, {
+                    cacheControl: "300",
+                    contentType: "application/pdf",
+                    upsert: false
+                });
+            if (upload.error) throw upload.error;
+            const version = await supabaseClient.from("resume_versions").insert({
+                id: resumeVersionId,
+                storage_path: resumePath,
+                label: String(values.get("resume_version_label") || "").trim()
             });
-        if (upload.error) throw upload.error;
+            if (version.error) {
+                const cleanup = await supabaseClient.storage
+                    .from("application-resumes")
+                    .remove([resumePath]);
+                if (cleanup.error) {
+                    throw new Error("Résumé version metadata could not be saved, and the uploaded file could not be cleaned up. Contact support.");
+                }
+                throw version.error;
+            }
+            createdVersion = true;
+        }
 
         const { error } = await supabaseClient.from("job_applications").insert({
             ...payload,
-            resume_path: resumePath
+            resume_path: resumePath,
+            resume_version_id: resumeVersionId
         });
         if (error) {
-            const cleanup = await supabaseClient.storage.from("application-resumes").remove([resumePath]);
-            if (cleanup.error) {
-                throw new Error(`${error.message} The uploaded résumé could not be cleaned up; contact support.`);
+            if (createdVersion) {
+                throw new Error(error.code === "23505"
+                    ? "You have already applied for this job. Your résumé version remains saved privately for later applications."
+                    : "Your application could not be submitted. Your résumé version remains saved privately for later applications.");
             }
             if (error.code === "23505") throw new Error("You have already applied for this job.");
             throw error;
@@ -1637,22 +2732,137 @@ async function submitJobApplication(event) {
     }
 }
 
+function openProviderRejectionDialog(application, control) {
+    const dialog = document.getElementById("provider-rejection-dialog");
+    const savedFeedback = currentApplicationRejectionFeedback.get(application.id);
+    pendingRejectionApplication = application;
+    pendingRejectionControl = control;
+    document.getElementById("provider-rejection-title").textContent =
+        application.status === "Rejected" ? "Edit rejection details" : "Reject application";
+    document.getElementById("provider-rejection-context").textContent =
+        `${application.applicant_name} · ${application.job_listings?.title || "Job listing"}`;
+    document.getElementById("provider-rejection-reason").value =
+        savedFeedback?.rejection_reason || "";
+    document.getElementById("provider-rejection-note").value =
+        savedFeedback?.rejection_note || "";
+    document.getElementById("provider-rejection-share-note").checked =
+        savedFeedback?.rejection_note_shared === true;
+    setMessage(document.getElementById("provider-rejection-message"), "", "");
+    dialog.showModal();
+    document.getElementById("provider-rejection-reason").focus();
+}
+
+async function submitProviderRejection(event) {
+    event.preventDefault();
+    if (!pendingRejectionApplication) return;
+    const application = pendingRejectionApplication;
+    const control = pendingRejectionControl;
+    const button = document.getElementById("provider-rejection-submit");
+    const previousLabel = button.textContent;
+    const rejectionNote = document.getElementById("provider-rejection-note").value.trim();
+    button.disabled = true;
+    button.textContent = "Saving...";
+    setMessage(document.getElementById("provider-rejection-message"), "Saving rejection details...", "");
+    try {
+        const result = await careerApi(
+            `/api/provider/job-applications/${encodeURIComponent(application.id)}/status`,
+            {
+                method: "PATCH",
+                body: JSON.stringify({
+                    status: "Rejected",
+                    rejection_reason: document.getElementById("provider-rejection-reason").value,
+                    rejection_note: rejectionNote,
+                    rejection_note_shared: document.getElementById("provider-rejection-share-note").checked
+                })
+            }
+        );
+        if (!result.application || result.application.status !== "Rejected") {
+            throw new Error("The rejection update was not confirmed.");
+        }
+        application.status = "Rejected";
+        currentApplicationRejectionFeedback.set(application.id, result.application);
+        if (control) control.value = "Rejected";
+        document.getElementById("provider-rejection-dialog").close();
+        renderProviderWorkspace();
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            "Application rejected. The selected reason is visible to the applicant; the note is shared only if you opted in.",
+            "success"
+        );
+        await loadNotifications();
+        await refreshProviderResponseMetrics();
+    } catch (error) {
+        setMessage(
+            document.getElementById("provider-rejection-message"),
+            supabaseErrorMessage(error),
+            "error"
+        );
+    } finally {
+        button.disabled = false;
+        button.textContent = previousLabel;
+    }
+}
+
+function openSkillGapForRejectedApplication(feedback, application) {
+    const roleInput = document.getElementById("skill-target-role");
+    const descriptionInput = document.getElementById("skill-job-description");
+    const skillForm = document.getElementById("skill-form");
+    const description = [
+        feedback.job_description,
+        feedback.job_requirements
+    ].filter((value) => typeof value === "string" && value.trim()).join("\n\n");
+    roleInput.value = feedback.job_title || application.job_title || "";
+    document.getElementById("skill-job-listing").value = "";
+    descriptionInput.value = description;
+    window.location.hash = "skills-workspace";
+    if (description.trim().length < 40) {
+        setMessage(
+            document.getElementById("skill-message"),
+            "The saved role details are too short to analyze. Add more job requirements before continuing.",
+            "error"
+        );
+        descriptionInput.focus();
+        return;
+    }
+    if (description.length > 12000) {
+        setMessage(
+            document.getElementById("skill-message"),
+            "The saved role details exceed the 12,000-character analysis limit. Shorten them before continuing.",
+            "error"
+        );
+        descriptionInput.focus();
+        return;
+    }
+    skillForm.requestSubmit();
+}
+
 async function updateJobApplicationStatus(id, status, control) {
+    const application = currentJobApplications.find((item) => item.id === id);
+    const previous = application?.status || "Submitted";
+    if (status === "Rejected") {
+        control.value = previous;
+        if (application) openProviderRejectionDialog(application, control);
+        return;
+    }
     control.disabled = true;
     try {
         await careerApi(`/api/provider/job-applications/${id}/status`, {
             method: "PATCH",
             body: JSON.stringify({ status })
         });
-        const application = currentJobApplications.find((item) => item.id === id);
         if (application) application.status = status;
+        currentApplicationRejectionFeedback.delete(id);
         renderProviderWorkspace();
-        setMessage(document.getElementById("provider-applicants-message"), `Applicant moved to ${status}.`, "success");
+        setMessage(
+            document.getElementById("provider-applicants-message"),
+            `Applicant stage changed from ${previous} to ${status}.`,
+            "success"
+        );
         await loadNotifications();
+        await refreshProviderResponseMetrics();
     } catch (error) {
         setMessage(document.getElementById("provider-applicants-message"), supabaseErrorMessage(error), "error");
-        const application = currentJobApplications.find((item) => item.id === id);
-        if (application) control.value = application.status;
+        control.value = previous;
     } finally {
         control.disabled = false;
     }
@@ -1661,11 +2871,20 @@ async function updateJobApplicationStatus(id, status, control) {
 function getFilteredApplications() {
     const query = applicationSearch.value.trim().toLocaleLowerCase();
     const selectedStatus = applicationFilter.value;
-    return currentApplications.filter((application) => {
+    const sort = document.getElementById("application-sort")?.value || "follow-up";
+    const filtered = currentApplications.filter((application) => {
         const matchesQuery = !query ||
             `${application.title} ${application.company}`.toLocaleLowerCase().includes(query);
         const matchesStatus = selectedStatus === "all" || application.status === selectedStatus;
         return matchesQuery && matchesStatus;
+    });
+    return filtered.sort((first, second) => {
+        if (sort === "company") return String(first.company || "").localeCompare(String(second.company || ""));
+        if (sort === "applied-oldest") return String(first.applied_on || "").localeCompare(String(second.applied_on || ""));
+        if (sort === "applied-newest") return String(second.applied_on || "").localeCompare(String(first.applied_on || ""));
+        const firstFollowUp = first.follow_up_on || "9999-12-31";
+        const secondFollowUp = second.follow_up_on || "9999-12-31";
+        return firstFollowUp.localeCompare(secondFollowUp);
     });
 }
 
@@ -1740,6 +2959,11 @@ function renderApplications() {
     filteredApplications.forEach((application) => {
         const row = document.createElement("div");
         row.className = "application-row";
+        if (application.follow_up_on
+            && !["Offer", "Rejected"].includes(application.status)
+            && application.follow_up_on < localDateValue()) {
+            row.classList.add("is-overdue");
+        }
         const details = document.createElement("div");
         details.className = "application-details";
         const title = document.createElement("strong");
@@ -2347,6 +3571,175 @@ async function deletePortfolioProject(project, button) {
     }
 }
 
+function resetStarStoryEditor() {
+    editingStarStoryId = null;
+    document.getElementById("star-story-form").reset();
+    document.getElementById("star-story-form-heading").textContent = "Add a story";
+    document.getElementById("save-star-story").textContent = "Save story";
+    document.getElementById("cancel-star-story-edit").hidden = true;
+}
+
+async function loadStarStories() {
+    const userId = currentUser?.id;
+    if (!userId || currentAccountType !== "job_seeker") return false;
+    setMessage(document.getElementById("star-story-message"), "Loading your private stories...");
+    try {
+        const stories = await careerApi("/api/star-stories");
+        if (currentUser?.id !== userId) return false;
+        if (!Array.isArray(stories)) {
+            throw new Error("The STAR story bank returned an unexpected response.");
+        }
+        currentStarStories = stories;
+        starStoriesAvailable = true;
+        renderStarStories();
+        setMessage(document.getElementById("star-story-message"), "");
+        return true;
+    } catch (error) {
+        if (currentUser?.id !== userId) return false;
+        currentStarStories = [];
+        starStoriesAvailable = false;
+        renderStarStories();
+        setMessage(
+            document.getElementById("star-story-message"),
+            error.message || "Could not load your private stories.",
+            "error"
+        );
+        return false;
+    }
+}
+
+function renderStarStories() {
+    const list = document.getElementById("star-story-list");
+    if (!list) return;
+    list.replaceChildren();
+    if (!starStoriesAvailable || !currentStarStories.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        const text = document.createElement("strong");
+        text.textContent = !starStoriesAvailable
+            ? "Your STAR stories are unavailable until the story bank is set up."
+            : "No saved STAR stories yet. Add one above to keep a practice example ready.";
+        empty.appendChild(text);
+        list.appendChild(empty);
+        return;
+    }
+
+    currentStarStories.forEach((story) => {
+        const card = document.createElement("article");
+        card.className = "portfolio-project-card star-story-card";
+        const title = document.createElement("h4");
+        title.textContent = story.title;
+        card.appendChild(title);
+        if (Array.isArray(story.skill_tags) && story.skill_tags.length) {
+            const tags = document.createElement("p");
+            tags.className = "learning-resource-meta";
+            tags.textContent = `Self-reported skill tags: ${story.skill_tags.join(", ")}`;
+            card.appendChild(tags);
+        }
+        for (const [label, field] of [
+            ["Situation", "situation"],
+            ["Task", "task"],
+            ["Action", "action"],
+            ["Result", "result"]
+        ]) {
+            const detail = document.createElement("p");
+            const strong = document.createElement("strong");
+            strong.textContent = `${label}: `;
+            detail.append(strong, document.createTextNode(story[field]));
+            card.appendChild(detail);
+        }
+        const controls = document.createElement("div");
+        controls.className = "portfolio-project-controls";
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.className = "secondary-button";
+        editButton.textContent = "Edit";
+        editButton.addEventListener("click", () => editStarStory(story));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className = "secondary-button";
+        deleteButton.textContent = "Delete";
+        deleteButton.addEventListener("click", () => deleteStarStory(story, deleteButton));
+        controls.append(editButton, deleteButton);
+        card.appendChild(controls);
+        list.appendChild(card);
+    });
+}
+
+function editStarStory(story) {
+    editingStarStoryId = story.id;
+    document.getElementById("star-story-title").value = story.title || "";
+    document.getElementById("star-story-skill-tags").value =
+        Array.isArray(story.skill_tags) ? story.skill_tags.join(", ") : "";
+    for (const field of ["situation", "task", "action", "result"]) {
+        document.getElementById(`star-story-${field}`).value = story[field] || "";
+    }
+    document.getElementById("star-story-form-heading").textContent = "Edit story";
+    document.getElementById("save-star-story").textContent = "Save changes";
+    document.getElementById("cancel-star-story-edit").hidden = false;
+    document.getElementById("star-story-title").focus();
+}
+
+async function saveStarStory(event) {
+    event.preventDefault();
+    const button = document.getElementById("save-star-story");
+    button.disabled = true;
+    const payload = {
+        title: document.getElementById("star-story-title").value.trim(),
+        situation: document.getElementById("star-story-situation").value.trim(),
+        task: document.getElementById("star-story-task").value.trim(),
+        action: document.getElementById("star-story-action").value.trim(),
+        result: document.getElementById("star-story-result").value.trim(),
+        skill_tags: document.getElementById("star-story-skill-tags").value
+            .split(/[,;\n]/).map((tag) => tag.trim()).filter(Boolean)
+    };
+    const wasEditing = Boolean(editingStarStoryId);
+    try {
+        const path = editingStarStoryId
+            ? `/api/star-stories/${encodeURIComponent(editingStarStoryId)}`
+            : "/api/star-stories";
+        await careerApi(path, {
+            method: editingStarStoryId ? "PATCH" : "POST",
+            body: JSON.stringify(payload)
+        });
+        resetStarStoryEditor();
+        if (await loadStarStories()) {
+            setMessage(
+                document.getElementById("star-story-message"),
+                wasEditing ? "Your STAR story has been updated." : "Your STAR story has been saved.",
+                "success"
+            );
+        }
+    } catch (error) {
+        setMessage(
+            document.getElementById("star-story-message"),
+            error.message || "Could not save this STAR story.",
+            "error"
+        );
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function deleteStarStory(story, button) {
+    if (!window.confirm(`Delete "${story.title}" from your private STAR story bank?`)) return;
+    button.disabled = true;
+    try {
+        await careerApi(`/api/star-stories/${encodeURIComponent(story.id)}`, { method: "DELETE" });
+        if (await loadStarStories()) {
+            setMessage(document.getElementById("star-story-message"), "STAR story deleted.", "success");
+        }
+    } catch (error) {
+        setMessage(
+            document.getElementById("star-story-message"),
+            error.message || "Could not delete this STAR story.",
+            "error"
+        );
+    } finally {
+        button.disabled = false;
+    }
+}
+
 function renderList(element, values, emptyText) {
     element.replaceChildren();
     const items = values.length ? values : [emptyText];
@@ -2385,6 +3778,16 @@ function renderDashboard() {
             `${summary.profile.completeness}%`;
         document.getElementById("dashboard-profile-detail").textContent =
             `${summary.profile.completeFields} of ${summary.profile.totalFields} fields complete`;
+        const checklist = document.getElementById("dashboard-profile-checklist");
+        checklist.replaceChildren();
+        summary.profile.checklist.forEach((item) => {
+            const row = document.createElement("li");
+            const link = document.createElement("a");
+            link.href = item.href;
+            link.textContent = item.complete ? `Complete: ${item.label}` : `Missing: ${item.label}`;
+            row.appendChild(link);
+            checklist.appendChild(row);
+        });
     }
     document.getElementById("dashboard-project-count").textContent =
         dashboardSources.portfolio === null
@@ -2413,16 +3816,61 @@ function renderDashboard() {
         && dashboardSources.careerApplications === true;
     const applicationsLoading = dashboardSources.manualApplications === null
         || dashboardSources.careerApplications === null;
+    const applicationCountsComplete = summary.applications.countsComplete;
     document.getElementById("dashboard-application-count").textContent =
-        applicationsLoaded
+        applicationsLoaded && applicationCountsComplete
             ? String(summary.applications.manual.total + summary.applications.careerLens.total)
-            : applicationsLoading ? "Loading" : "Unavailable";
+            : applicationsLoading ? "Loading" : applicationsLoaded ? "--" : "Unavailable";
     document.getElementById("dashboard-application-detail").textContent =
-        applicationsLoaded
+        applicationsLoaded && applicationCountsComplete
             ? `Manual: ${summary.applications.manual.total} total, ${summary.applications.manual.inProgress} active, ${summary.applications.manual.interviews} interviews, ${summary.applications.manual.offers} offers · CareerLens: ${summary.applications.careerLens.total} total, ${summary.applications.careerLens.inProgress} active, ${summary.applications.careerLens.interviews} interviews, ${summary.applications.careerLens.offers} offers · ${summary.profile.linkedResumeCount} linked private résumés`
             : applicationsLoading
                 ? "Loading application data..."
-                : "One or more application sources could not be loaded";
+                : applicationsLoaded
+                    ? "At least one application source reached its 1,000-record display limit; totals may be incomplete."
+                    : "One or more application sources could not be loaded";
+    const statusContainer = document.getElementById("dashboard-application-statuses");
+    statusContainer.replaceChildren();
+    if (applicationsLoaded && applicationCountsComplete) {
+        if (!summary.applications.statusCounts.length) {
+            const item = document.createElement("span");
+            item.textContent = "No application records yet.";
+            statusContainer.appendChild(item);
+        } else {
+            summary.applications.statusCounts.forEach(({ status, manual, careerLens }) => {
+                const item = document.createElement("span");
+                item.textContent = `${status}: ${manual + careerLens} (manual ${manual} · CareerLens ${careerLens})`;
+                statusContainer.appendChild(item);
+            });
+        }
+    } else {
+        const item = document.createElement("span");
+        item.textContent = applicationsLoading ? "Loading status counts..." : "Status counts unavailable";
+        statusContainer.appendChild(item);
+    }
+    const responseTime = document.getElementById("dashboard-first-response-time");
+    const responseTimeDetail = document.getElementById("dashboard-first-response-detail");
+    if (applicationAnalyticsLoading) {
+        responseTime.textContent = "Loading";
+        responseTimeDetail.textContent = "Loading recorded CareerLens status events...";
+    } else if (
+        !applicationAnalyticsError
+        && applicationAnalytics?.complete
+        && Number.isFinite(applicationAnalytics.average_first_response_hours)
+        && applicationAnalytics.measured_applications > 0
+    ) {
+        const hours = applicationAnalytics.average_first_response_hours;
+        responseTime.textContent = hours >= 24
+            ? `${(hours / 24).toFixed(1)} days`
+            : `${hours.toFixed(1)} hours`;
+        responseTimeDetail.textContent =
+            `${applicationAnalytics.calculation} Based on ${applicationAnalytics.measured_applications} application${applicationAnalytics.measured_applications === 1 ? "" : "s"}. Descriptive only, not a hiring prediction.`;
+    } else {
+        responseTime.textContent = "--";
+        responseTimeDetail.textContent = applicationAnalyticsError
+            ? `${applicationAnalyticsError} No estimate is shown.`
+            : "No complete recorded response timestamps are available; manual tracker entries and older unrecorded transitions are excluded.";
+    }
 
     const actionsList = document.getElementById("dashboard-actions");
     actionsList.replaceChildren();
@@ -2458,7 +3906,16 @@ function renderDashboard() {
         const link = document.createElement("a");
         link.href = "#browse-jobs";
         link.textContent = "Review opportunity";
-        card.append(title, company, explanation, link);
+        card.append(
+            title,
+            company,
+            explanation,
+            createResponseMetricsElement(
+                jobResponseMetrics.get(job.id),
+                jobResponsivenessAvailable
+            ),
+            link
+        );
         recommendations.appendChild(card);
     });
     const recommendationEmpty = document.getElementById("dashboard-recommendations-empty");
@@ -2564,6 +4021,20 @@ function renderNotifications() {
         body.textContent = notification.body;
         const actions = document.createElement("div");
         actions.className = "notification-actions";
+        if (
+            notification.data?.application_id
+            && notification.notification_type === "interview_slot_available"
+        ) {
+            const viewTimes = document.createElement("button");
+            viewTimes.type = "button";
+            viewTimes.className = "secondary-button";
+            viewTimes.textContent = "View available times";
+            viewTimes.addEventListener("click", () => {
+                window.location.hash = "applications";
+                void loadSeekerApplications();
+            });
+            actions.appendChild(viewTimes);
+        }
         if (notification.data?.application_id && notification.notification_type === "interview_scheduled") {
             const calendar = document.createElement("button");
             calendar.type = "button";
@@ -2595,14 +4066,18 @@ async function markNotificationRead(id) {
     }
 }
 
-async function downloadInterviewCalendar(applicationId, button) {
+async function downloadInterviewCalendar(
+    applicationId,
+    button,
+    messageElementId = "notifications-message"
+) {
     const previous = button.textContent;
     button.disabled = true;
     button.textContent = "Preparing...";
     try {
         const { data: { session }, error } = await supabaseClient.auth.getSession();
         if (error || !session) throw error || new Error("Your session has expired. Please sign in again.");
-        const response = await fetch(`/api/job-applications/${applicationId}/interview.ics`, { headers: { Authorization: `Bearer ${session.access_token}` } });
+        const response = await fetch(`/api/job-applications/${encodeURIComponent(applicationId)}/interview.ics`, { headers: { Authorization: `Bearer ${session.access_token}` } });
         if (!response.ok) {
             const payload = await response.json();
             throw new Error(payload.error || "Could not create the calendar file.");
@@ -2614,7 +4089,7 @@ async function downloadInterviewCalendar(applicationId, button) {
         link.click();
         URL.revokeObjectURL(link.href);
     } catch (error) {
-        setMessage(document.getElementById("notifications-message"), error.message, "error");
+        setMessage(document.getElementById(messageElementId), error.message, "error");
     } finally {
         button.disabled = false;
         button.textContent = previous;
@@ -2837,9 +4312,11 @@ function renderLearningWorkspace() {
     const targetedSkills = CareerLensLearningUi.getLearningPlanSkills(learningPlan);
     const skillsList = document.getElementById("learning-targeted-skills");
     skillsList.replaceChildren();
-    targetedSkills.forEach((skill) => {
+    const skillProgress = CareerLensLearningUi.getLearningPlanSkillProgress(learningPlan);
+    skillProgress.forEach((entry) => {
         const tag = document.createElement("li");
-        tag.textContent = skill;
+        tag.textContent =
+            `${entry.skill}: ${entry.completed}/${entry.total} self-reported complete · ${entry.inProgress} in progress`;
         skillsList.appendChild(tag);
     });
     document.getElementById("learning-targeted-skills-empty").hidden =
@@ -3032,10 +4509,14 @@ function renderSkillGapResults(result) {
     document.getElementById("skill-priority-list").textContent =
         summary.priority_skills.join(", ");
 
-    const gapList = document.getElementById("skill-gap-list");
-    gapList.replaceChildren();
+    const evidenceList = document.getElementById("skill-evidence-found-list");
+    const assessmentList = document.getElementById("skill-needs-assessment-list");
+    const noEvidenceList = document.getElementById("skill-no-evidence-list");
+    evidenceList.replaceChildren();
+    assessmentList.replaceChildren();
+    noEvidenceList.replaceChildren();
     if (!result.skills.length) {
-        gapList.appendChild(createEmptyState(
+        evidenceList.appendChild(createEmptyState(
             "No supported skills recognized",
             "The job description did not match a skill in CareerLens’ current vocabulary. Add clear skills or requirements to the description and try again."
         ));
@@ -3100,7 +4581,24 @@ function renderSkillGapResults(result) {
             sequence.textContent = `Possible learning sequence: ${skill.learning_sequence.join(" → ")}`;
             card.appendChild(sequence);
         }
-        gapList.appendChild(card);
+        const targetList = skill.status === "Demonstrated"
+            ? evidenceList
+            : skill.status === "Needs assessment"
+                ? assessmentList
+                : noEvidenceList;
+        targetList.appendChild(card);
+    });
+    [
+        [evidenceList, "No contextual evidence found for this group."],
+        [assessmentList, "No skills currently need assessment."],
+        [noEvidenceList, "No skills are in the no-evidence group."]
+    ].forEach(([list, emptyText]) => {
+        if (!list.childElementCount) {
+            const empty = document.createElement("p");
+            empty.className = "learning-empty-state";
+            empty.textContent = emptyText;
+            list.appendChild(empty);
+        }
     });
 
     document.getElementById("skill-count").textContent = String(
@@ -3213,6 +4711,72 @@ function renderInterviewPack(pack) {
         answer.maxLength = 2000;
         answer.placeholder = "Plan your answer: context, your specific actions, and the result...";
 
+        const storyReference = document.createElement("div");
+        storyReference.className = "practice-story-reference";
+        if (starStoriesAvailable && currentStarStories.length) {
+            const storyLabel = document.createElement("label");
+            storyLabel.htmlFor = `practice-story-${index}`;
+            storyLabel.textContent = "Add a saved STAR story to these answer notes";
+            const storySelect = document.createElement("select");
+            storySelect.id = `practice-story-${index}`;
+            const placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = "Choose a saved story";
+            storySelect.appendChild(placeholder);
+            currentStarStories.forEach((story) => {
+                const option = document.createElement("option");
+                option.value = story.id;
+                option.textContent = story.title;
+                storySelect.appendChild(option);
+            });
+            const addStory = document.createElement("button");
+            addStory.type = "button";
+            addStory.className = "secondary-button";
+            addStory.textContent = "Add to answer notes";
+            addStory.disabled = true;
+            storySelect.addEventListener("change", () => {
+                addStory.disabled = !storySelect.value;
+            });
+            addStory.addEventListener("click", () => {
+                const story = currentStarStories.find((item) => item.id === storySelect.value);
+                if (!story) return;
+                const storyNotes = [
+                    `STAR story: ${story.title}`,
+                    `Situation: ${story.situation}`,
+                    `Task: ${story.task}`,
+                    `Action: ${story.action}`,
+                    `Result: ${story.result}`
+                ].join("\n");
+                const combinedNotes = answer.value
+                    ? `${answer.value}\n\n${storyNotes}`
+                    : storyNotes;
+                if (combinedNotes.length > answer.maxLength) {
+                    setMessage(
+                        document.getElementById("interview-prep-message"),
+                        "These notes would exceed the 2,000-character answer limit. Shorten your notes and try again.",
+                        "error"
+                    );
+                    return;
+                }
+                answer.value = combinedNotes;
+                setMessage(
+                    document.getElementById("interview-prep-message"),
+                    "Saved story added to these browser-only answer notes; it was not sent to Gemini.",
+                    "success"
+                );
+            });
+            storyReference.append(storyLabel, storySelect, addStory);
+        } else {
+            const note = document.createElement("p");
+            note.className = "muted-text";
+            note.textContent = "No saved STAR stories are available to add. ";
+            const link = document.createElement("a");
+            link.href = "#star-story-bank";
+            link.textContent = "Open STAR Story Bank";
+            note.appendChild(link);
+            storyReference.appendChild(note);
+        }
+
         const practiceLabel = document.createElement("label");
         practiceLabel.className = "practice-question-toggle";
         const checkbox = document.createElement("input");
@@ -3220,7 +4784,7 @@ function renderInterviewPack(pack) {
         checkbox.className = "practice-question-check";
         checkbox.addEventListener("change", updatePracticeProgress);
         practiceLabel.append(checkbox, document.createTextNode(" Practiced"));
-        card.append(heading, question, followUp, answerLabel, answer, practiceLabel);
+        card.append(heading, question, followUp, answerLabel, answer, storyReference, practiceLabel);
         questionList.appendChild(card);
     });
 
@@ -3384,13 +4948,29 @@ document.getElementById("close-job-application").addEventListener("click", () =>
 jobApplicationDialog.addEventListener("close", () => {
     applyingToJobId = null;
     jobApplicationForm.reset();
+    updateResumeVersionInputs();
 });
+const providerRejectionDialog = document.getElementById("provider-rejection-dialog");
+const providerRejectionForm = document.getElementById("provider-rejection-form");
+document.getElementById("close-provider-rejection").addEventListener("click", () => providerRejectionDialog.close());
+document.getElementById("cancel-provider-rejection").addEventListener("click", () => providerRejectionDialog.close());
+providerRejectionDialog.addEventListener("close", () => {
+    pendingRejectionApplication = null;
+    pendingRejectionControl = null;
+    providerRejectionForm.reset();
+});
+providerRejectionForm.addEventListener("submit", submitProviderRejection);
+document.getElementById("resume-version-select").addEventListener("change", updateResumeVersionInputs);
 jobApplicationForm.addEventListener("submit", submitJobApplication);
 document.getElementById("job-search").addEventListener("input", renderJobBoard);
 document.getElementById("job-type-filter").addEventListener("change", renderJobBoard);
+document.getElementById("job-location-filter").addEventListener("input", renderJobBoard);
+document.getElementById("job-match-filter").addEventListener("change", renderJobBoard);
 document.getElementById("job-sort").addEventListener("change", renderJobBoard);
 document.getElementById("provider-job-filter").addEventListener("change", renderProviderApplicants);
 document.getElementById("provider-applicant-filter").addEventListener("change", renderProviderApplicants);
+document.getElementById("provider-applicant-search").addEventListener("input", renderProviderApplicants);
+document.getElementById("provider-listing-status-filter").addEventListener("change", renderProviderJobs);
 document.getElementById("add-application").addEventListener("click", () => {
     openApplicationDialog();
 });
@@ -3402,12 +4982,15 @@ applicationDialog.addEventListener("close", () => {
 document.getElementById("application-date").addEventListener("change", updateFollowUpMinimum);
 applicationSearch.addEventListener("input", renderApplications);
 applicationFilter.addEventListener("change", renderApplications);
+document.getElementById("application-sort").addEventListener("change", renderApplications);
 document.getElementById("export-applications").addEventListener("click", exportApplications);
 applicationForm.addEventListener("submit", saveApplication);
 document.getElementById("my-profile-form").addEventListener("submit", saveMyProfile);
 document.getElementById("employer-profile-form").addEventListener("submit", saveEmployerProfile);
 document.getElementById("portfolio-form").addEventListener("submit", savePortfolioProject);
 document.getElementById("project-cancel-edit").addEventListener("click", resetPortfolioEditor);
+document.getElementById("star-story-form").addEventListener("submit", saveStarStory);
+document.getElementById("cancel-star-story-edit").addEventListener("click", resetStarStoryEditor);
 document.getElementById("skill-form").addEventListener("submit", renderSkillAnalysis);
 document.getElementById("skill-job-listing")?.addEventListener("change", fillSkillAnalysisFromJob);
 document.getElementById("application-material-job")?.addEventListener("change", (event) => loadApplicationMaterials(event.target.value));

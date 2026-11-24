@@ -1,102 +1,76 @@
 # CareerLens Testing Summary
 
-**Execution date:** 2026-11-02
-**Environment:** Linux, Python 3.12.3, Node.js v24.15.0, repository virtual
-environment `.venv`.
+**Execution date:** 2026-11-24
+**Environment:** Windows, Python 3.12.2, Node.js v23.11.0
 
-## Test commands and observed results
+## Automated checks
 
-| Command | Observed result |
+| Command | Result |
 |---|---|
-| `./.venv/bin/python -m unittest discover -s tests -v` | 77 tests ran; `OK`; 0 failures |
-| `node --test tests/*.cjs` | 9 tests; 9 passed; 0 failed |
+| `python -m unittest discover -s tests -v` | 136 tests passed, including response-metric checks and structured rejection validation, ownership, note sharing, and privacy contracts |
+| `node --test tests/test_dashboard_ui.cjs tests/test_learning_ui.cjs` | 10 tests passed |
 | `node --check backend/static/script.js` | Passed |
 | `node --check backend/static/dashboard-ui.js` | Passed |
 | `node --check backend/static/learning-ui.js` | Passed |
-| `./.venv/bin/python -m py_compile backend/app.py backend/job_matching.py backend/learning.py backend/skill_gap.py` | Passed |
-| `./.venv/bin/python -m pip check` | No broken requirements found |
-| `git diff --check` | Passed |
-| Local Gunicorn on port 5001; HTTP GET `/`, `/api/config`, `/static/script.js` | Each returned HTTP 200; local process stopped after smoke test |
-| Integrated browser, local `GET /` | CareerLens title and sign-in controls appeared; no account was used |
+| `python -m py_compile backend/app.py tests/test_app.py` | Passed |
+| Pylance syntax checks for `backend/app.py` and `tests/test_app.py` | No syntax errors |
+| Local Flask HTTP smoke test: `GET /`, `GET /api/config` | Both returned HTTP 200 |
+| `python -m pip check` | Environment warning: installed `httpcore 1.0.5` requires `h11<0.15`, but `h11 0.16.0` is present. Neither package is pinned in this project's `requirements.txt`. |
 
-**Automated total:** 86 tests discovered across the two test runners; 86 passed
-and 0 failed. These totals count unit/API/helper tests, not end-to-end user
-journeys.
+Python tests use `unittest`, Flask's test client, generated PDF fixtures, and
+mocked Supabase/Gemini calls. Coverage includes input and role validation,
+provider-only routes, recommendation and skill-gap logic, safe error responses
+and logging, Gemini caps, and SQL policy contracts. Node tests cover dashboard
+and learning summary helpers. Résumé-version tests inspect that seeker access
+is owner-scoped, provider access requires the version to be selected on an
+application for a provider-owned listing, and applications cannot mismatch the
+selected version and its storage path. Notification tests verify every
+application stage produces an event and interview calendar downloads are
+authenticated and limited to applications visible through RLS. Interview-slot
+tests inspect seeker/provider ownership policies, conflict locking and overlap
+checks, route role validation, empty lists, booking, cancellation, and safe
+conflict responses. These migration contract checks do not execute SQL.
+STAR story tests cover seeker-only CRUD, text and tag bounds, empty results,
+missing rows, owner omission from writes, and RLS policy source conditions.
+Interview Prep adds saved stories only to browser-side answer notes; this
+workflow does not submit them to Gemini.
+Response transparency tests cover seeker/provider authorization, the five-
+application threshold, zero applications, mocked odd/even median results,
+rejection-stage SQL inclusion, provider ownership, and aggregate-only route
+payloads. SQL contract tests assert PostgreSQL's `percentile_cont(0.5)` median
+calculation; the migration was not executed against a live database.
+Structured rejection tests cover missing and invalid reasons, the 500-character
+note limit, atomic provider status updates, non-owner denial, clearing
+rejection details on a later stage, seeker-only owner-scoped reads, and
+unshared-note redaction. Source-contract checks verify that the Phase 27
+security-definer read returns only rejection details and related listing text,
+without applicant identities or reviewer notes; the migration was not executed
+against PostgreSQL.
+Synthetic recommendation examples are authored fixtures, not an independent
+or representative accuracy evaluation.
 
-## Test environment and coverage
+## Security and integration boundaries
 
-Python tests are under `tests/test_*.py` and use `unittest`, Flask's test
-client, generated PDF fixtures, and mocked Supabase/Gemini HTTP responses.
-They cover role gating, input validation, resume parsing, skill-gap
-classification, learning/project payload handling, recommendation behavior,
-sanitized errors, and API response logic.
+The SQL tests assert policy source conditions for user-owned profiles,
+applications, projects, learning plans, bookmarks, STAR stories, notifications,
+status history, and application materials, and confirm applicant-facing routes
+do not expose provider review notes. They inspect SQL text only: they do not
+execute SQL or prove that a deployed Supabase project has the expected grants,
+policies, migrations, or Storage settings. No live Supabase, Gemini, or
+deployed-site request was made as part of these automated tests.
 
-Node tests are `tests/test_dashboard_ui.cjs` and
-`tests/test_learning_ui.cjs`; they verify dashboard/learning summary helper
-logic with fixtures. `tests/test_recommendation_evaluation.py` contains
-hand-authored synthetic examples. These examples do not constitute an
-independent or representative evaluation dataset and must not be interpreted
-as real-world accuracy.
+The Flask tests verify bearer-token forwarding and route role checks with
+mocks. Gemini tests verify consent, request limiting, bounded input/output,
+and sanitized failures without calling Google. No browser-level workflow,
+responsive layout, load test, accessibility audit, or vulnerability scan was
+performed.
 
-`test_app.py` includes static SQL text checks for RLS policy contracts. Those
-checks do not execute SQL or prove effective grants/policies in a deployed
-Supabase database.
+## Manual QA before demonstration
 
-## Integration classification
-
-| Area | Test type | Result / limitation |
-|---|---|---|
-| Flask request handling and validation | Local Flask test client | Passed as listed above |
-| Supabase auth/database calls | Mocked HTTP / patched helpers | Contract behavior covered; no real project request |
-| Supabase RLS and Storage | Static SQL assertion/source review | No runtime database or object access test |
-| Gemini | Mocked HTTP responses | Consent and error handling exercised locally; no real model call |
-| Browser rendering | Integrated-browser homepage snapshot | Sign-in title and controls appeared on local Gunicorn |
-| Browser job seeker/provider workflow | Not run | Requires test accounts and live Supabase |
-| Responsive viewport checks | Not run | No completed width/device checks |
-| Deployed website | Not run | No deployment performed |
-
-## Failures, warnings, and blocked checks
-
-- **Automated failures:** 0.
-- **Blocked external tests:** live Supabase Auth, database, RLS, Storage,
-  redirects, Gemini API, and deployed-site verification require an isolated
-  project, credentials, test accounts, or deployment access; none were used.
-- **Not run:** cross-account browser flows, end-to-end job application path,
-  dashboard/live data consistency, responsive layout, accessibility audit,
-  load/performance testing, and dependency vulnerability scanning.
-- **Known test output:** Python tests deliberately simulate provider timeouts
-  and malformed responses; those cases emit expected exception logs while the
-  corresponding tests pass.
-
-## Security checks performed
-
-- Reviewed server-side bearer-token and role checks in `backend/app.py`.
-- Reviewed static RLS and Storage policies in the base schema and migrations.
-- Verified tests assert selected ownership/role policy fragments.
-- Inspected user-content rendering patterns; displayed user content is
-  predominantly inserted via DOM text APIs.
-- Confirmed `.env` is ignored and no secret-like path is tracked in the Git
-  index at the inspection.
-
-These are repository-local checks, not a penetration test or a certification
-of live Supabase security.
-
-## Recommended manual verification
-
-Use an isolated Supabase project with no real user data:
-
-1. Review and apply `backend/supabase_schema.sql`.
-2. Apply `backend/migrations/phase3_learning.sql` and
-   `backend/migrations/phase5_portfolio.sql` if testing those modules.
-3. Configure local Site URL and allowed redirect URLs.
-4. Create two seeker accounts and two provider accounts with test-only data.
-5. Verify cross-user profile, application, learning-plan, and portfolio access
-   is denied.
-6. Verify provider A cannot access provider B's listing/applicants/reviews.
-7. Confirm résumé upload and download work for the applicant and listing
-   provider while an unrelated user is denied.
-8. Verify auth expiry/sign-out, refresh, and redirect flows in the browser.
-9. Optionally test Gemini with synthetic content, a test key, and explicit
-   user consent.
-10. Capture screenshots only from actual test account sessions; remove
-    personal data and tokens before including them in a report.
+Use an isolated, non-production Supabase project and synthetic records. Follow
+the [manual demonstration QA checklist](../README.md#manual-demonstration-qa-checklist)
+for both job-seeker and provider accounts. In particular, test two accounts of
+each type against profile, project, learning-plan, bookmark, application,
+STAR story, listing, reviewer-note, and résumé visibility. Live cross-account
+RLS and Storage behavior remains unverified until those checks are run against
+the configured Supabase project.

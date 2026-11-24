@@ -67,11 +67,59 @@ function summarizeCareerDashboard({
         savedSkills.length > 0,
         projectsList.length > 0
     ];
+    const profileChecklist = [
+        {
+            key: "target_role",
+            label: "Add a target role",
+            complete: profileFields[0],
+            href: "#my-profile"
+        },
+        {
+            key: "headline",
+            label: "Add a headline",
+            complete: profileFields[1],
+            href: "#my-profile"
+        },
+        {
+            key: "about",
+            label: "Add an About section of at least 20 characters",
+            complete: profileFields[2],
+            href: "#my-profile"
+        },
+        {
+            key: "skills",
+            label: "Save at least one meaningful skill",
+            complete: profileFields[3],
+            href: "#my-profile"
+        },
+        {
+            key: "portfolio",
+            label: "Add at least one portfolio project",
+            complete: profileFields[4],
+            href: "#my-profile"
+        }
+    ];
     const plan = Array.isArray(learningPlan) ? learningPlan : [];
+    const manualItems = Array.isArray(manualApplications) ? manualApplications : [];
     const careerItems = Array.isArray(careerApplications) ? careerApplications : [];
     const linkedResumeCount = careerItems.filter(
         (application) => hasMeaningfulText(application.resume_path)
     ).length;
+    const knownStatusOrder = [
+        "Applied", "Under Review", "Submitted", "CV review", "Shortlisted",
+        "Interview", "Offer", "Hired", "Rejected", "Withdrawn"
+    ];
+    const statusNames = [...new Set([
+        ...manualItems.map((application) => application.status),
+        ...careerItems.map((application) => application.status)
+    ].filter((status) => hasMeaningfulText(status)))].sort((first, second) => {
+        const firstOrder = knownStatusOrder.indexOf(first);
+        const secondOrder = knownStatusOrder.indexOf(second);
+        if (firstOrder < 0 && secondOrder < 0) return first.localeCompare(second);
+        if (firstOrder < 0) return 1;
+        if (secondOrder < 0) return -1;
+        return firstOrder - secondOrder;
+    });
 
     return {
         profile: {
@@ -80,6 +128,7 @@ function summarizeCareerDashboard({
             completeness: Math.round(
                 profileFields.filter(Boolean).length / profileFields.length * 100
             ),
+            checklist: profileChecklist,
             skillsCount: savedSkills.length,
             projectsCount: projectsList.length,
             projectSkillsCount: projectSkills.size,
@@ -104,8 +153,18 @@ function summarizeCareerDashboard({
                 .sort((first, second) => first.localeCompare(second))
         },
         applications: {
-            manual: summarizeApplications(manualApplications, "manual"),
-            careerLens: summarizeApplications(careerItems, "careerLens")
+            manual: summarizeApplications(manualItems, "manual"),
+            careerLens: summarizeApplications(careerItems, "careerLens"),
+            statusCounts: statusNames.map((status) => {
+                const manual = manualItems.filter((application) =>
+                    application.status === status
+                ).length;
+                const careerLens = careerItems.filter((application) =>
+                    application.status === status
+                ).length;
+                return { status, manual, careerLens, total: manual + careerLens };
+            }),
+            countsComplete: manualItems.length < 1000 && careerItems.length < 1000
         },
         recommendations: Array.isArray(recommendations)
             ? recommendations.filter((job) => job && job.id && job.match).slice(0, 3)

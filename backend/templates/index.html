@@ -104,6 +104,7 @@
                 <a class="nav-link" href="#applications" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-clock"></use></svg></span><span>My applications</span></a>
                 <a class="nav-link" href="#application-materials" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-file"></use></svg></span><span>Resume &amp; Cover Letter</span></a>
                 <p class="nav-label" data-nav-account-type="job_seeker">CAREER TOOLS</p>
+                <a class="nav-link" href="#star-story-bank" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-book"></use></svg></span><span>STAR Story Bank</span></a>
                 <a class="nav-link" href="#interview-prep-workspace" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-briefcase"></use></svg></span><span>Interview Prep</span></a>
                 <a class="nav-link" href="#ai-assist-workspace" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-sparkles"></use></svg></span><span>AI Assistant</span></a>
                 <a class="nav-link" href="#skills-workspace" data-account-type="job_seeker"><span class="nav-icon" aria-hidden="true"><svg class="icon"><use href="#icon-target"></use></svg></span><span>Skill Gap Analysis</span></a>
@@ -181,6 +182,20 @@
                     <article><span>Learning plan</span><strong id="dashboard-learning-count">--</strong><small id="dashboard-learning-detail">Saved resources</small></article>
                     <article><span>Applications</span><strong id="dashboard-application-count">--</strong><small id="dashboard-application-detail">Manual tracker and CareerLens submissions</small></article>
                 </div>
+                <section class="learning-panel" aria-labelledby="profile-checklist-title">
+                    <h3 id="profile-checklist-title">Profile completeness checklist</h3>
+                    <ul id="dashboard-profile-checklist" class="dashboard-action-list"></ul>
+                </section>
+                <section class="learning-panel" aria-labelledby="application-status-title">
+                    <h3 id="application-status-title">Applications by status</h3>
+                    <div id="dashboard-application-statuses" class="dashboard-status-counts"></div>
+                    <p class="muted-text">Counts use loaded records from both sources; status labels remain source-specific and the source counts are shown separately.</p>
+                </section>
+                <section class="learning-panel" aria-labelledby="application-response-time-title">
+                    <h3 id="application-response-time-title">Average first provider response time</h3>
+                    <p><strong id="dashboard-first-response-time">--</strong></p>
+                    <p id="dashboard-first-response-detail" class="muted-text">Loading recorded CareerLens status events...</p>
+                </section>
                 <div class="dashboard-panels">
                     <section class="learning-panel" aria-labelledby="dashboard-actions-title">
                         <h3 id="dashboard-actions-title">Suggested next actions</h3>
@@ -261,14 +276,27 @@
                         <option value="all">All job types</option>
                         <option>Full-time</option><option>Part-time</option><option>Contract</option><option>Internship</option>
                     </select>
+                    <label class="sr-only" for="job-location-filter">Filter by location</label>
+                    <input id="job-location-filter" type="search" placeholder="Filter location">
+                    <label class="sr-only" for="job-match-filter">Filter by skills match level</label>
+                    <select id="job-match-filter">
+                        <option value="all">All match levels</option>
+                        <option value="strong">Strong match (75-100)</option>
+                        <option value="moderate">Moderate match (40-74)</option>
+                        <option value="limited">Limited match (0-39)</option>
+                        <option value="unavailable">Match unavailable</option>
+                        <option value="saved">Saved jobs</option>
+                    </select>
                     <label class="sr-only" for="job-sort">Sort jobs</label>
                     <select id="job-sort">
                         <option value="relevance">Sort by profile alignment</option>
                         <option value="newest">Sort by newest</option>
+                        <option value="company">Sort by company A-Z</option>
                     </select>
                 </div>
                 <p id="job-profile-guidance" class="job-profile-guidance" role="status" aria-live="polite" hidden></p>
                 <p class="job-match-disclaimer">Profile alignment is based on explicit job skill requirements and your saved profile evidence. It is not a measure of competence, an ATS score, or a prediction of hiring.</p>
+                <p class="tool-note">How it works: required and preferred skills are matched deterministically to your saved skills, profile/project context, and learning plan. Missing or incomplete profile evidence can lower or hide a match; the alignment is not a hiring prediction.</p>
                 <p id="job-board-message" class="form-message" role="status" aria-live="polite"></p>
                 <div id="job-board-list" class="job-board-list" aria-live="polite"></div>
             </section>
@@ -284,6 +312,15 @@
                     <article class="stat-card"><div class="stat-icon orange"><svg class="icon" aria-hidden="true"><use href="#icon-clock"></use></svg></div><p>In review</p><h2 id="provider-review-count">0</h2><span class="stat-note">Candidates to follow up with</span></article>
                     <article class="stat-card"><div class="stat-icon blue"><svg class="icon" aria-hidden="true"><use href="#icon-check"></use></svg></div><p>Closed roles</p><h2 id="provider-closed-count">0</h2><span class="stat-note">Roles no longer accepting applicants</span></article>
                 </section>
+                <section class="provider-overview-panel" aria-labelledby="provider-response-title">
+                    <div class="section-heading">
+                        <div>
+                            <p class="eyebrow">EMPLOYER RESPONSE TRANSPARENCY</p>
+                            <h2 id="provider-response-title">Your response metrics</h2>
+                        </div>
+                    </div>
+                    <div id="provider-response-summary" aria-live="polite"></div>
+                </section>
                 <section class="provider-overview-panel">
                     <div class="section-heading"><div><p class="eyebrow">YOUR HIRING PIPELINE</p><h2>Recent applications</h2></div><a class="tool-link" href="#provider-applicants">Review all applicants <svg class="icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg></a></div>
                     <div id="provider-recent-applicants" class="provider-applicant-list"></div>
@@ -298,23 +335,34 @@
 
             <section class="page-view section-block" id="provider-jobs" data-page-view data-page-title="Job listings" data-account-type="job_provider">
                 <div class="section-heading"><div><p class="eyebrow">YOUR OPPORTUNITIES</p><h2>Manage job listings.</h2><p class="subtitle">Draft, publish, and close roles from one place.</p></div><button class="primary-button" type="button" data-open-job-form>+ Post a job</button></div>
+                <div class="provider-applicant-controls">
+                    <label class="sr-only" for="provider-listing-status-filter">Filter listings by status</label>
+                    <select id="provider-listing-status-filter">
+                        <option value="all">All listing statuses</option>
+                        <option value="draft">Draft</option>
+                        <option value="published">Published</option>
+                        <option value="closed">Closed</option>
+                    </select>
+                </div>
                 <p id="provider-jobs-message" class="form-message" role="status" aria-live="polite"></p>
                 <div id="provider-job-list" class="provider-job-list"></div>
             </section>
 
             <section class="page-view section-block" id="provider-applicants" data-page-view data-page-title="Applicants" data-account-type="job_provider">
-                <div class="section-heading"><div><p class="eyebrow">CANDIDATE PIPELINE</p><h2>Review applicants.</h2><p class="subtitle">Applicants are ranked by the same evidence breakdown used for job seekers, alongside résumé review, interviews, and private hiring notes.</p></div></div>
+                <div class="section-heading"><div><p class="eyebrow">CANDIDATE PIPELINE</p><h2>Review applicants.</h2><p class="subtitle">Use the same transparent skill-evidence breakdown to review required and preferred skills. Alignment is not a hiring score or a hiring recommendation. Private hiring notes are visible only to the hiring provider.</p></div></div>
                 <div class="application-stage-guide" id="application-stage-guide" aria-label="Hiring stages">
                     <span>Submitted</span><span aria-hidden="true">→</span><span>CV review</span><span aria-hidden="true">→</span><span>Shortlisted</span><span aria-hidden="true">→</span><span>Interview</span><span aria-hidden="true">→</span><span>Offer</span><span aria-hidden="true">→</span><span>Hired or rejected</span>
                 </div>
                 <div class="provider-applicant-controls">
+                    <label class="sr-only" for="provider-applicant-search">Search applicants</label>
+                    <input id="provider-applicant-search" type="search" placeholder="Search name, email, or role">
                     <label class="sr-only" for="provider-job-filter">Filter applicants by job</label>
                     <select id="provider-job-filter"><option value="all">All job listings</option></select>
                     <label class="sr-only" for="provider-applicant-filter">Filter applicants by status</label>
                     <select id="provider-applicant-filter"><option value="all">All stages</option><option>Submitted</option><option>CV review</option><option>Shortlisted</option><option>Interview</option><option>Offer</option><option>Hired</option><option>Rejected</option><option>Withdrawn</option></select>
                 </div>
                 <p id="provider-applicants-message" class="form-message" role="status" aria-live="polite"></p>
-                <div id="provider-applicant-board" class="provider-applicant-list"></div>
+                <div id="provider-applicant-board" class="provider-applicant-table-wrap"></div>
             </section>
 
             <section class="page-view section-block applications-section" id="applications" data-page-view data-page-title="My applications" data-account-type="job_seeker">
@@ -352,6 +400,13 @@
                         <option>Offer</option>
                         <option>Rejected</option>
                     </select>
+                    <label class="sr-only" for="application-sort">Sort applications</label>
+                    <select id="application-sort">
+                        <option value="follow-up">Follow-up date</option>
+                        <option value="applied-newest">Newest applied</option>
+                        <option value="applied-oldest">Oldest applied</option>
+                        <option value="company">Company A-Z</option>
+                    </select>
                     <span id="application-result-count" class="muted-text" aria-live="polite"></span>
                 </div>
                 <div class="application-panel">
@@ -367,7 +422,7 @@
                     <div>
                         <p class="eyebrow">INTERVIEW CONFIDENCE</p>
                         <h2>Practice for the role, not just the interview.</h2>
-                        <p class="subtitle">Build a focused question set from the job description. Your text is processed for this request and is not stored.</p>
+                        <p class="subtitle">Build a focused question set from the job description. Your text is processed for this request and is not stored. Add a saved <a href="#star-story-bank">STAR story</a> to your private answer notes; it stays in your browser and is not sent to Gemini.</p>
                     </div>
                 </div>
                 <form id="interview-prep-form" class="tool-form interview-prep-form">
@@ -414,12 +469,53 @@
                 </div>
             </section>
 
+            <section class="page-view section-block workspace-section" id="star-story-bank" data-page-view data-page-title="STAR Story Bank" data-account-type="job_seeker">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">YOUR EXPERIENCE, ORGANIZED</p>
+                        <h2>STAR Story Bank</h2>
+                        <p class="subtitle">Save concise Situation, Task, Action, and Result examples for interview practice. Stories are private to your account, self-reported, and not verified or shared with employers.</p>
+                    </div>
+                </div>
+                <form id="star-story-form" class="tool-form star-story-form">
+                    <h3 id="star-story-form-heading">Add a story</h3>
+                    <div class="interview-form-grid">
+                        <div>
+                            <label for="star-story-title">Story title</label>
+                            <input id="star-story-title" name="title" maxlength="120" required placeholder="e.g. Improved a team handoff">
+                        </div>
+                        <div>
+                            <label for="star-story-skill-tags">Skill tags <span class="muted-text">(comma-separated, optional)</span></label>
+                            <input id="star-story-skill-tags" name="skill_tags" maxlength="600" placeholder="e.g. communication, planning">
+                        </div>
+                    </div>
+                    <label for="star-story-situation">Situation</label>
+                    <textarea id="star-story-situation" name="situation" rows="2" maxlength="1200" required></textarea>
+                    <label for="star-story-task">Task</label>
+                    <textarea id="star-story-task" name="task" rows="2" maxlength="1200" required></textarea>
+                    <label for="star-story-action">Action</label>
+                    <textarea id="star-story-action" name="action" rows="3" maxlength="1600" required></textarea>
+                    <label for="star-story-result">Result</label>
+                    <textarea id="star-story-result" name="result" rows="2" maxlength="1200" required></textarea>
+                    <p class="muted-text">Keep all story text to 1,700 characters or fewer. Stories are user-provided examples, not verified evidence of proficiency.</p>
+                    <div class="interview-form-footer">
+                        <button class="primary-button" type="submit" id="save-star-story">Save story</button>
+                        <button class="secondary-button" type="button" id="cancel-star-story-edit" hidden>Cancel edit</button>
+                    </div>
+                </form>
+                <p id="star-story-message" class="form-message" role="status" aria-live="polite"></p>
+                <div id="star-story-list" class="portfolio-project-list" aria-live="polite">
+                    <div class="empty-state"><strong>Loading your private stories...</strong></div>
+                </div>
+            </section>
+
             <section class="page-view section-block workspace-section" id="application-materials" data-page-view data-page-title="Resume & Cover Letter" data-account-type="job_seeker">
                 <div class="section-heading">
                     <div>
                         <p class="eyebrow">JOB-SPECIFIC APPLICATIONS</p>
                         <h2>Tailor your résumé and cover letter.</h2>
                         <p class="subtitle">Choose a published role. CareerLens uses your saved profile and portfolio projects to draft focused bullets and a cover letter without inventing experience.</p>
+                        <p class="tool-note">How it works: selected profile, project, and listing text is sent to Gemini only after consent. Drafts can be inaccurate; verify every claim against your real experience. This is writing assistance, not a hiring prediction.</p>
                     </div>
                 </div>
                 <form id="application-materials-form" class="tool-form">
@@ -462,6 +558,7 @@
                         <p class="eyebrow">OPTIONAL GEMINI ASSISTANCE</p>
                         <h2>AI Assistant.</h2>
                         <p class="subtitle">Choose a focused assistant and review every suggestion while keeping people, not AI, in control.</p>
+                        <p class="tool-note">How it works: only the tool, target role, and text you submit with consent are sent to Gemini. Requests are not stored by CareerLens; answers may be inaccurate and are not employment decisions.</p>
                     </div>
                 </div>
                 <div class="ai-assistant-tabs" role="tablist" aria-label="AI Assistant tools" data-account-type="job_seeker">
@@ -709,7 +806,20 @@
                         <p id="skill-priority-list"></p>
                         <small>Ordered by how often recognized terms appear in the job description, not by employer importance.</small>
                     </section>
-                    <div id="skill-gap-list" class="skill-gap-list"></div>
+                    <div class="skill-gap-list">
+                        <section class="skill-priority-panel" aria-labelledby="skill-evidence-found-title">
+                            <h4 id="skill-evidence-found-title">Evidence found</h4>
+                            <div id="skill-evidence-found-list" class="skill-gap-list"></div>
+                        </section>
+                        <section class="skill-priority-panel" aria-labelledby="skill-needs-assessment-title">
+                            <h4 id="skill-needs-assessment-title">Needs assessment</h4>
+                            <div id="skill-needs-assessment-list" class="skill-gap-list"></div>
+                        </section>
+                        <section class="skill-priority-panel" aria-labelledby="skill-no-evidence-title">
+                            <h4 id="skill-no-evidence-title">No evidence</h4>
+                            <div id="skill-no-evidence-list" class="skill-gap-list"></div>
+                        </section>
+                    </div>
                     <section class="skill-learning-recommendations" aria-labelledby="skill-learning-title">
                         <div>
                             <h4 id="skill-learning-title">Learning resources for skills to investigate</h4>
@@ -777,13 +887,21 @@
     <dialog class="application-dialog" id="job-application-dialog">
         <form id="job-application-form" class="tool-form">
             <div class="modal-heading"><div><p class="eyebrow">JOB APPLICATION</p><h2 id="job-application-title">Apply for this role</h2></div><button type="button" class="close-modal" id="close-job-application" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg></button></div>
+            <div id="job-application-response-metrics"></div>
             <p class="application-sharing-note">Your name, email, introduction, résumé PDF, and saved profile or portfolio evidence will be shared with this job's provider for hiring review. Your résumé is stored privately and is visible only to you and the provider for this job.</p>
             <label for="candidate-name">Your name</label>
             <input id="candidate-name" name="applicant_name" maxlength="80" required>
             <label for="candidate-email">Email address</label>
             <input id="candidate-email" name="applicant_email" type="email" maxlength="254" required>
-            <label for="candidate-resume">Résumé / CV (PDF, max 5 MB)</label>
+            <label for="resume-version-select">Résumé version to share</label>
+            <select id="resume-version-select" name="resume_version_id">
+                <option value="">Upload and save a new résumé version</option>
+            </select>
+            <p class="muted-text">Only the version selected for this application is shared with its provider. Saved versions stay private to you unless selected for an application.</p>
+            <label for="candidate-resume">New résumé version (PDF, max 5 MB)</label>
             <input id="candidate-resume" name="resume" type="file" accept=".pdf,application/pdf" required>
+            <label for="resume-version-label">Version label <span class="muted-text">(optional)</span></label>
+            <input id="resume-version-label" name="resume_version_label" maxlength="100" placeholder="e.g. Backend-focused résumé">
             <label for="candidate-note">Message to the provider <span class="muted-text">(optional)</span></label>
             <textarea id="candidate-note" name="cover_note" rows="6" maxlength="4000" placeholder="Share a brief introduction or relevant experience..."></textarea>
             <label class="ai-consent">
@@ -792,6 +910,40 @@
             </label>
             <button type="submit" class="primary-button" id="job-application-submit">Submit application</button>
             <p id="job-application-message" class="form-message" role="status" aria-live="polite"></p>
+        </form>
+    </dialog>
+
+    <dialog class="application-dialog" id="provider-rejection-dialog" aria-describedby="provider-rejection-context">
+        <form id="provider-rejection-form" class="tool-form">
+            <div class="modal-heading">
+                <div>
+                    <p class="eyebrow">APPLICATION UPDATE</p>
+                    <h2 id="provider-rejection-title">Reject application</h2>
+                </div>
+                <button type="button" class="close-modal" id="close-provider-rejection" aria-label="Close">
+                    <svg class="icon" aria-hidden="true"><use href="#icon-close"></use></svg>
+                </button>
+            </div>
+            <p id="provider-rejection-context" class="muted-text"></p>
+            <label for="provider-rejection-reason">Reason</label>
+            <select id="provider-rejection-reason" required>
+                <option value="">Choose one reason</option>
+                <option value="skills_gap">Skills gap</option>
+                <option value="experience_level">Experience level</option>
+                <option value="position_filled">Position filled</option>
+                <option value="role_requirements_changed">Role requirements changed</option>
+                <option value="application_incomplete">Application incomplete</option>
+                <option value="other">Other</option>
+            </select>
+            <label for="provider-rejection-note">Optional note (up to 500 characters)</label>
+            <textarea id="provider-rejection-note" rows="4" maxlength="500"></textarea>
+            <label class="ai-consent">
+                <input id="provider-rejection-share-note" type="checkbox">
+                <span>Share this note with the applicant (off by default)</span>
+            </label>
+            <button type="submit" class="primary-button" id="provider-rejection-submit">Confirm rejection</button>
+            <button type="button" class="secondary-button" id="cancel-provider-rejection">Cancel</button>
+            <p id="provider-rejection-message" class="form-message" role="status" aria-live="polite"></p>
         </form>
     </dialog>
 </body>

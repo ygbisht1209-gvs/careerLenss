@@ -34,6 +34,32 @@ function getLearningPlanSkills(plan) {
     return [...skills.values()].sort((first, second) => first.localeCompare(second));
 }
 
+function getLearningPlanSkillProgress(plan) {
+    const progress = new Map();
+    plan.forEach((item) => {
+        (item.resource?.skill_tags || []).forEach((tag) => {
+            const value = typeof tag === "string" ? tag.trim() : "";
+            if (!value) return;
+            const key = value.toLocaleLowerCase();
+            if (!progress.has(key)) {
+                progress.set(key, { skill: value, total: 0, completed: 0, inProgress: 0 });
+            }
+            const entry = progress.get(key);
+            entry.total += 1;
+            if (item.status === "completed") entry.completed += 1;
+            if (item.status === "in_progress") entry.inProgress += 1;
+        });
+    });
+    return [...progress.values()]
+        .map((entry) => ({
+            ...entry,
+            completion: entry.total
+                ? Math.round(entry.completed / entry.total * 100)
+                : 0
+        }))
+        .sort((first, second) => first.skill.localeCompare(second.skill));
+}
+
 function formatLearningDate(value) {
     if (typeof value !== "string" || !value) return "Date unavailable";
     const date = new Date(value);
@@ -45,5 +71,6 @@ globalThis.CareerLensLearningUi = Object.freeze({
     filterLearningResources,
     groupLearningPlan,
     getLearningPlanSkills,
+    getLearningPlanSkillProgress,
     formatLearningDate
 });

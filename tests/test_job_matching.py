@@ -2,6 +2,7 @@ import unittest
 
 from backend.job_matching import (
     build_job_recommendations,
+    build_job_what_if,
     extract_job_requirements,
 )
 
@@ -66,6 +67,34 @@ class JobMatchingTests(unittest.TestCase):
         )
         self.assertTrue(match["relevant_evidence"])
         self.assertIn("not an independent", match["required_skills"][0]["explanation"])
+
+    def test_what_if_simulation_is_deterministic_and_does_not_mutate_profile(self):
+        job = {
+            "id": "job-1",
+            "title": "Backend Developer",
+            "company": "Example",
+            "description": "Required: Python and SQL.",
+            "requirements": "",
+        }
+        profile = {
+            "skills": ["Python"],
+            "headline": "",
+            "about": "Built Python tools for a class project.",
+        }
+
+        first = build_job_what_if(job, profile, add_skills=["SQL"])
+        second = build_job_what_if(job, profile, add_skills=["SQL"])
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["baseline_score"], 50)
+        self.assertEqual(first["simulated_score"], 68)
+        self.assertEqual(first["delta"], 18)
+        self.assertEqual(first["added_skills"], ["SQL"])
+        self.assertEqual(profile["skills"], ["Python"])
+        self.assertEqual(
+            first["simulated_match"]["required_skills"][1]["status"],
+            "Needs assessment",
+        )
 
     def test_empty_profile_and_unclassified_mentions_do_not_get_misleading_scores(self):
         result = build_job_recommendations(

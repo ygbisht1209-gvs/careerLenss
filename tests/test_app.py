@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import unittest
@@ -36,6 +37,8 @@ def create_pdf(text):
 class CareerLensApiTests(unittest.TestCase):
     def setUp(self):
         self.client = app_module.app.test_client()
+        with app_module._GEMINI_RATE_LIMIT_LOCK:
+            app_module._GEMINI_RATE_LIMIT_WINDOWS.clear()
         self.url_patch = patch.object(
             app_module, "SUPABASE_URL", "https://example.supabase.co"
         )
@@ -52,11 +55,12 @@ class CareerLensApiTests(unittest.TestCase):
         self.addCleanup(self.auth_request.stop)
 
     def post_interview_prep(self, payload):
-        return self.client.post(
-            "/api/interview-prep",
-            headers={"Authorization": "Bearer valid-session"},
-            json=payload,
-        )
+        with patch.object(app_module, "verify_supabase_job_seeker", return_value=None):
+            return self.client.post(
+                "/api/interview-prep",
+                headers={"Authorization": "Bearer valid-session"},
+                json=payload,
+            )
 
     def post_ai_assist(self, payload):
         return self.client.post(
@@ -102,6 +106,15 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertIn(b'value="job_seeker"', page.data)
         self.assertIn(b'value="job_provider"', page.data)
         self.assertIn(b'id="provider-applicants"', page.data)
+        self.assertIn(b'id="provider-response-summary"', page.data)
+        self.assertIn(b'id="provider-listing-status-filter"', page.data)
+        self.assertIn(b'id="provider-applicant-search"', page.data)
+        self.assertIn(b'id="job-application-response-metrics"', page.data)
+        self.assertIn(b'href="#star-story-bank"', page.data)
+        self.assertIn(b'id="star-story-form"', page.data)
+        self.assertIn(b"not sent to Gemini", page.data)
+        self.assertIn(b'not a hiring score or a hiring recommendation', page.data)
+        self.assertIn(b'id="provider-applicant-board"', page.data)
         self.assertIn(
             b'value="improve_job_description" data-account-type="job_provider"',
             page.data,
@@ -141,6 +154,14 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertIn(b'id="current-skills"', page.data)
         self.assertIn(b"Edit skills in My Profile", page.data)
         self.assertIn(b'id="job-sort"', page.data)
+        self.assertIn(b'id="job-location-filter"', page.data)
+        self.assertIn(b'id="job-match-filter"', page.data)
+        self.assertIn(b'id="application-sort"', page.data)
+        self.assertIn(b'id="dashboard-profile-checklist"', page.data)
+        self.assertIn(b'id="dashboard-application-statuses"', page.data)
+        self.assertIn(b'id="skill-evidence-found-list"', page.data)
+        self.assertIn(b'id="skill-needs-assessment-list"', page.data)
+        self.assertIn(b'id="skill-no-evidence-list"', page.data)
         self.assertIn(b'id="job-profile-guidance"', page.data)
         self.assertIn(b"Profile alignment is based on explicit job skill requirements", page.data)
         self.assertIn(b'id="skill-job-listing"', page.data)
@@ -207,6 +228,323 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertIn("(select public.owns_job_listing(job_id))", schema)
         self.assertIn("provider_id = (select auth.uid())", schema)
         self.assertIn("(select public.owns_job_application(application_id))", schema)
+        review_policy = schema.split(
+            "alter table public.application_reviews enable row level security", 1
+        )[1].split(
+            "drop trigger if exists set_application_review_updated_at", 1
+        )[0]
+        self.assertIn("Providers can view reviews for their applications", review_policy)
+        self.assertIn("provider_id = (select auth.uid())", review_policy)
+        self.assertNotIn("Applicants can view", review_policy)
+
+    def test_saved_jobs_migration_has_owner_scoped_rls(self):
+        migration = (
+            Path(__file__).parents[1]
+            / "backend"
+            / "migrations"
+            / "phase18_saved_jobs.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("create table if not exists public.saved_jobs", migration)
+        self.assertIn("alter table public.saved_jobs enable row level security", migration)
+        self.assertIn("user_id = (select auth.uid())", migration)
+        self.assertIn("(select public.is_job_seeker())", migration)
+        self.assertIn("create policy \"Job seekers can view their saved jobs\"", migration)
+        self.assertIn("create policy \"Job seekers can save jobs\"", migration)
+        self.assertIn("create policy \"Job seekers can remove saved jobs\"", migration)
+
+    def test_star_story_migration_limits_access_and_text_to_the_owner(self):
+        migration = (
+            Path(__file__).parents[1]
+            / "backend"
+            / "migrations"
+            / "phase25_star_story_bank.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("create table if not exists public.star_stories", migration)
+        self.assertIn("alter table public.star_stories enable row level security", migration)
+        self.assertIn("user_id = (select auth.uid())", migration)
+        self.assertNotIn("is_job_provider", migration)
+        self.assertIn("(select public.is_job_seeker())", migration)
+        self.assertIn("for select", migration)
+        self.assertIn("for insert", migration)
+        self.assertIn("for update", migration)
+        self.assertIn("for delete", migration)
+        self.assertIn("star_stories_total_text_limit", migration)
+        self.assertIn("star_story_skill_tags_valid", migration)
+        self.assertIn("notify pgrst, 'reload schema'", migration)
+        policies = migration.split(
+            "alter table public.star_stories enable row level security", 1
+        )[1].split("revoke all on public.star_stories", 1)[0]
+        self.assertEqual(policies.count("(select auth.uid())"), 5)
+        self.assertEqual(policies.count("(select public.is_job_seeker())"), 5)
+
+    def test_employer_response_migration_exposes_only_thresholded_aggregates(self):
+        migration = (
+            Path(__file__).parents[1]
+            / "backend"
+            / "migrations"
+            / "phase26_employer_response_transparency.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("create index if not exists application_status_events_app_response_idx", migration)
+        self.assertIn("create or replace function public.get_job_responsiveness", migration)
+        self.assertIn("create or replace function public.get_provider_response_metrics", migration)
+        self.assertIn("Listing providers can view their application status history", migration)
+        self.assertIn("(select public.is_job_provider())", migration)
+        self.assertIn("(select public.owns_job_listing(application.job_id))", migration)
+        self.assertIn("listing.status = 'published'", migration)
+        self.assertIn("listing.provider_id = auth.uid()", migration)
+        self.assertIn("where listing.provider_id = auth.uid()", migration)
+        self.assertIn("revoke all on public.application_status_events from public, anon, authenticated", migration)
+        self.assertIn("grant select on public.application_status_events to authenticated", migration)
+        self.assertNotIn("for insert to authenticated", migration)
+        self.assertNotIn("for update to authenticated", migration)
+        self.assertEqual(migration.count("security definer"), 2)
+        self.assertEqual(migration.count("set search_path = ''"), 2)
+        self.assertEqual(migration.count("sample_size, 0) >= 5"), 3)
+        self.assertEqual(migration.count("percentile_cont(0.5)"), 2)
+        self.assertIn("'Rejected'", migration)
+        self.assertNotIn("'Withdrawn'", migration)
+        self.assertIn("grant execute on function public.get_job_responsiveness(uuid)", migration)
+        self.assertIn("grant execute on function public.get_provider_response_metrics()", migration)
+        self.assertIn("notify pgrst, 'reload schema';", migration)
+        self.assertNotIn("applicant_name", migration)
+        self.assertNotIn("applicant_email", migration)
+
+    def test_application_status_history_migration_is_applicant_scoped_and_audits_changes(self):
+        migration = (
+            Path(__file__).parents[1]
+            / "backend"
+            / "migrations"
+            / "phase19_application_status_history.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("create table if not exists public.application_status_events", migration)
+        self.assertIn("alter table public.application_status_events enable row level security", migration)
+        self.assertIn("applicant_id = (select auth.uid())", migration)
+        self.assertIn("(select public.is_job_seeker())", migration)
+        self.assertIn("after insert or update on public.job_applications", migration)
+        self.assertIn("status = 'Submitted'", migration)
+        self.assertIn("notify pgrst, 'reload schema';", migration)
+        self.assertNotIn("for insert to authenticated", migration.split(
+            "alter table public.application_status_events enable row level security", 1
+        )[1].split("revoke all on public.application_status_events", 1)[0])
+
+    def test_resume_versions_migration_limits_access_to_the_owner_and_selected_application_version(self):
+        repository_root = Path(__file__).parents[1]
+        migration = (
+            repository_root
+            / "backend"
+            / "migrations"
+            / "phase22_resume_versions.sql"
+        ).read_text(encoding="utf-8")
+        template = (
+            repository_root / "backend" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+        script = (
+            repository_root / "backend" / "static" / "script.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("create table if not exists public.resume_versions", migration)
+        self.assertIn("alter table public.resume_versions enable row level security", migration)
+        self.assertIn("user_id = (select auth.uid())", migration)
+        self.assertIn("(select public.is_job_seeker())", migration)
+        self.assertIn("application.resume_version_id = resume_versions.id", migration)
+        self.assertIn("(select public.owns_job_listing(application.job_id))", migration)
+        self.assertIn("version.user_id = (select auth.uid())", migration)
+        self.assertIn("version.storage_path = job_applications.resume_path", migration)
+        self.assertIn("char_length(label) <= 100", migration)
+        self.assertIn("notify pgrst, 'reload schema';", migration)
+        self.assertIn('id="resume-version-select"', template)
+        self.assertIn('name="resume_version_id"', template)
+        self.assertIn('from("resume_versions").insert', script)
+        self.assertIn("resume_version_id: resumeVersionId", script)
+        self.assertNotIn("service_role", migration + script)
+
+    def test_notification_calendar_migration_notifies_each_status_transition(self):
+        repository_root = Path(__file__).parents[1]
+        migration = (
+            repository_root
+            / "backend"
+            / "migrations"
+            / "phase23_notification_calendar_enhancements.sql"
+        ).read_text(encoding="utf-8")
+        notifications = (
+            repository_root
+            / "backend"
+            / "migrations"
+            / "phase16_provider_applicant_ranking.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("create or replace function public.notify_application_status_change()", migration)
+        self.assertIn("old.status is distinct from new.status", migration)
+        self.assertNotIn("new.status in (", migration)
+        self.assertIn("new.status = 'Withdrawn' and auth.uid() = new.applicant_id", migration)
+        self.assertIn("select provider_id into recipient_id", migration)
+        self.assertIn("'from_status', old.status", migration)
+        self.assertIn("'status', new.status", migration)
+        self.assertIn("new.id::text || ':' || gen_random_uuid()::text", migration)
+        self.assertIn("notify pgrst, 'reload schema';", migration)
+
+        read_policy = notifications.split(
+            'create policy "Users can view their notifications"', 1
+        )[1].split(";", 1)[0]
+        self.assertIn("(select auth.uid()) = user_id", read_policy)
+
+    def test_interview_slot_migration_scopes_owners_and_serializes_bookings(self):
+        migration = (
+            Path(__file__).parents[1]
+            / "backend"
+            / "migrations"
+            / "phase24_interview_slot_booking.sql"
+        ).read_text(encoding="utf-8")
+        select_policy = migration.split(
+            'create policy "Applicants and listing providers can view interview slots"',
+            1,
+        )[1].split(";", 1)[0]
+
+        self.assertIn(
+            "create table if not exists public.application_interview_slots",
+            migration,
+        )
+        self.assertIn(
+            "alter table public.application_interview_slots enable row level security",
+            migration,
+        )
+        self.assertIn("provider_id = (select auth.uid())", select_policy)
+        self.assertIn("(select public.is_job_provider())", select_policy)
+        self.assertIn("(select public.owns_job_application(application_id))", select_policy)
+        self.assertIn("application.applicant_id = (select auth.uid())", select_policy)
+        self.assertIn(
+            "application_interview_slots_one_booked_per_application",
+            migration,
+        )
+        self.assertIn("pg_advisory_xact_lock", migration)
+        self.assertIn("other_slot.starts_at < slot.starts_at + interval '30 minutes'", migration)
+        self.assertIn("pg_catalog.now()", migration)
+        self.assertIn("notification_type in (", migration)
+        self.assertIn("'interview_slot_available'", migration)
+        self.assertIn("'interview_slot_unavailable'", migration)
+        self.assertIn("'interview_cancelled'", migration)
+        self.assertIn("public.is_job_seeker()", migration)
+        self.assertIn("public.is_job_provider()", migration)
+        self.assertIn("notify pgrst, 'reload schema';", migration)
+        self.assertNotIn("using (true)", select_policy)
+
+    def test_rejection_feedback_migration_separates_applicant_feedback_from_private_reviews(self):
+        migration = (
+            Path(__file__).parents[1]
+            / "backend"
+            / "migrations"
+            / "phase20_rejection_feedback.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("create table if not exists public.application_rejection_feedback", migration)
+        self.assertIn("alter table public.application_rejection_feedback enable row level security", migration)
+        self.assertIn("provider_id = (select auth.uid())", migration)
+        self.assertIn("applicant_id = (select auth.uid())", migration)
+        self.assertIn("(select public.owns_job_application(application_id))", migration)
+        self.assertIn("application.status = 'Rejected'", migration)
+        self.assertIn("char_length(feedback) <= 1000", migration)
+        self.assertIn("notify pgrst, 'reload schema';", migration)
+        self.assertNotIn("reviewer_notes", migration)
+
+    def test_structured_rejection_migration_enforces_atomic_updates_and_safe_reads(self):
+        migration = (
+            Path(__file__).parents[1]
+            / "backend"
+            / "migrations"
+            / "phase27_structured_rejection_feedback.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("add column if not exists rejection_reason text", migration)
+        self.assertIn("add column if not exists rejection_note_shared boolean not null default false", migration)
+        self.assertIn("char_length(rejection_note) <= 500", migration)
+        for reason in (
+            "skills_gap",
+            "experience_level",
+            "position_filled",
+            "role_requirements_changed",
+            "application_incomplete",
+            "other",
+        ):
+            self.assertIn(f"'{reason}'", migration)
+        self.assertIn("create or replace function public.update_job_application_status_with_rejection", migration)
+        self.assertIn("public.owns_job_listing(target_application.job_id)", migration)
+        self.assertIn("delete from public.application_rejection_feedback", migration)
+        self.assertIn('create policy "Providers can view rejection feedback for their applications"', migration)
+        self.assertIn('drop policy if exists "Applicants can view their rejection feedback"', migration)
+        self.assertIn("and application.applicant_id = auth.uid()", migration)
+        self.assertIn(
+            "when feedback.rejection_note_shared then feedback.rejection_note",
+            migration,
+        )
+        self.assertIn("and char_length(feedback.feedback) <= 500", migration)
+        self.assertIn("revoke insert, update, delete on public.application_rejection_feedback", migration)
+        self.assertIn("notify pgrst, 'reload schema';", migration)
+        self.assertNotIn("reviewer_notes", migration)
+
+    def test_rls_contracts_scope_private_data_and_keep_review_notes_provider_only(self):
+        repository_root = Path(__file__).parents[1]
+        schema = (repository_root / "backend" / "supabase_schema.sql").read_text(
+            encoding="utf-8"
+        )
+        migrations = repository_root / "backend" / "migrations"
+        materials = (migrations / "phase15_application_materials.sql").read_text(
+            encoding="utf-8"
+        )
+        notifications = (migrations / "phase16_provider_applicant_ranking.sql").read_text(
+            encoding="utf-8"
+        )
+        saved_jobs = (migrations / "phase18_saved_jobs.sql").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("(select auth.uid()) = user_id", materials)
+        self.assertIn("(select auth.uid()) = user_id", notifications)
+        self.assertIn("user_id = (select auth.uid())", saved_jobs)
+        self.assertIn("(select public.is_job_seeker())", saved_jobs)
+        notification_read_policy = notifications.split(
+            'create policy "Users can view their notifications"', 1
+        )[1].split(";", 1)[0]
+        notification_update_policy = notifications.split(
+            'create policy "Users can mark their notifications read"', 1
+        )[1].split(";", 1)[0]
+        self.assertIn("(select auth.uid()) = user_id", notification_read_policy)
+        self.assertIn("(select auth.uid()) = user_id", notification_update_policy)
+
+        review_policy = schema.split(
+            "create policy \"Providers can view reviews for their applications\"", 1
+        )[1].split(";", 1)[0]
+        self.assertIn("provider_id = (select auth.uid())", review_policy)
+        self.assertIn("(select public.owns_job_application(application_id))", review_policy)
+        self.assertNotIn("applicant_id", review_policy)
+
+        resume_policy = schema.split(
+            "create or replace function public.can_access_application_resume", 1
+        )[1].split("$$;", 1)[0]
+        self.assertIn("application.applicant_id = (select auth.uid())", resume_policy)
+        self.assertIn("(select public.owns_job_listing(application.job_id))", resume_policy)
+
+    def test_saving_a_job_uses_database_owner_default_and_rls(self):
+        job_id = "63d0cc2a-a48b-4e42-9ed1-26579a0678c3"
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module,
+            "supabase_rest_request",
+            return_value=(201, [{"job_id": job_id}]),
+        ) as proxy:
+            response = self.client.post(
+                "/api/saved-jobs",
+                headers={"Authorization": "Bearer seeker-session"},
+                json={"job_id": job_id},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(proxy.call_args.kwargs["payload"], {"job_id": job_id})
+        self.assertNotIn("user_id", proxy.call_args.kwargs["payload"])
 
     def test_employer_profile_public_title_stays_separate_from_private_contacts(self):
         repository_root = Path(__file__).parents[1]
@@ -262,6 +600,30 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertIn("job description", missing.json["error"].lower())
         self.assertEqual(too_long.status_code, 400)
         self.assertIn("12,000", too_long.json["error"])
+
+    def test_skill_gap_rejects_non_pdf_mime_and_files_over_five_mib(self):
+        base = {
+            "target_role": "Backend Developer",
+            "job_description": "Python and Flask experience are required for this role.",
+        }
+        with patch.object(app_module, "verify_supabase_job_seeker", return_value=None):
+            wrong_mime = self.post_skill_gap({
+                **base,
+                "resume": (io.BytesIO(b"%PDF-1.4"), "resume.pdf", "text/plain"),
+            })
+            oversized = self.post_skill_gap({
+                **base,
+                "resume": (
+                    io.BytesIO(b"x" * (app_module.MAX_FILE_SIZE + 1)),
+                    "resume.pdf",
+                    "application/pdf",
+                ),
+            })
+
+        self.assertEqual(wrong_mime.status_code, 400)
+        self.assertIn("PDF", wrong_mime.json["error"])
+        self.assertEqual(oversized.status_code, 400)
+        self.assertIn("5 MB", oversized.json["error"])
 
     def test_skill_gap_uses_resume_and_experience_with_explainable_results(self):
         with patch.object(app_module, "verify_supabase_job_seeker", return_value=None):
@@ -602,6 +964,147 @@ class CareerLensApiTests(unittest.TestCase):
         )
         self.assertEqual(proxy.call_args_list[1].kwargs["method"], "DELETE")
 
+    def test_star_story_routes_require_authentication_and_seeker_role(self):
+        story_id = "00000000-0000-0000-0000-000000000001"
+        unauthenticated = [
+            self.client.get("/api/star-stories"),
+            self.client.post("/api/star-stories", json={}),
+            self.client.patch(f"/api/star-stories/{story_id}", json={}),
+            self.client.delete(f"/api/star-stories/{story_id}"),
+        ]
+        self.assertTrue(all(response.status_code == 401 for response in unauthenticated))
+
+        forbidden = ({"error": "Job seekers only."}, 403)
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=forbidden
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            denied = [
+                self.client.get("/api/star-stories", headers={"Authorization": "Bearer test"}),
+                self.client.post("/api/star-stories", headers={"Authorization": "Bearer test"}, json={}),
+                self.client.patch(
+                    f"/api/star-stories/{story_id}",
+                    headers={"Authorization": "Bearer test"},
+                    json={},
+                ),
+                self.client.delete(
+                    f"/api/star-stories/{story_id}",
+                    headers={"Authorization": "Bearer test"},
+                ),
+            ]
+
+        self.assertTrue(all(response.status_code == 403 for response in denied))
+        proxy.assert_not_called()
+
+    def test_star_story_routes_support_empty_create_update_and_delete(self):
+        story_id = "00000000-0000-0000-0000-000000000001"
+        payload = {
+            "title": "Improved a team handoff",
+            "situation": "Requests were delayed between two teams.",
+            "task": "I needed to clarify ownership.",
+            "action": "I introduced a shared checklist and weekly review.",
+            "result": "The teams reported fewer missed handoffs.",
+            "skill_tags": ["Communication", "communication", "Planning"],
+        }
+        saved = {"id": story_id, **payload, "skill_tags": ["Communication", "Planning"]}
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module,
+            "supabase_rest_request",
+            side_effect=[(200, []), (201, [saved]), (200, [saved]), (200, [saved])],
+        ) as proxy:
+            empty = self.client.get(
+                "/api/star-stories", headers={"Authorization": "Bearer test"}
+            )
+            created = self.client.post(
+                "/api/star-stories",
+                headers={"Authorization": "Bearer test"},
+                json=payload,
+            )
+            updated = self.client.patch(
+                f"/api/star-stories/{story_id}",
+                headers={"Authorization": "Bearer test"},
+                json=payload,
+            )
+            deleted = self.client.delete(
+                f"/api/star-stories/{story_id}",
+                headers={"Authorization": "Bearer test"},
+            )
+
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.json, [])
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(proxy.call_args_list[0].args[0], (
+            "star_stories?select=id,title,situation,task,action,result,skill_tags,"
+            "created_at,updated_at&order=updated_at.desc"
+        ))
+        self.assertEqual(
+            proxy.call_args_list[1].kwargs["payload"]["skill_tags"],
+            ["Communication", "Planning"],
+        )
+        self.assertNotIn("user_id", proxy.call_args_list[1].kwargs["payload"])
+        self.assertEqual(proxy.call_args_list[2].kwargs["method"], "PATCH")
+        self.assertEqual(proxy.call_args_list[3].kwargs["method"], "DELETE")
+
+    def test_star_story_routes_reject_invalid_content_and_report_missing_rows(self):
+        story_id = "00000000-0000-0000-0000-000000000001"
+        valid = {
+            "title": "Improved a team handoff",
+            "situation": "Requests were delayed between two teams.",
+            "task": "I needed to clarify ownership.",
+            "action": "I introduced a shared checklist and weekly review.",
+            "result": "The teams reported fewer missed handoffs.",
+            "skill_tags": ["Communication"],
+        }
+        invalid_payloads = [
+            {**valid, "skill_tags": ["tag"] * 13},
+            {**valid, "skill_tags": ["x" * 51]},
+            {**valid, "situation": " "},
+            {**valid, "action": "a" * 1601},
+            {**valid, "user_id": "untrusted"},
+            {
+                **valid,
+                "title": "t" * 120,
+                "situation": "s" * 1200,
+                "task": "t" * 1200,
+                "action": "a" * 1600,
+                "result": "r" * 1200,
+            },
+        ]
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            responses = [
+                self.client.post(
+                    "/api/star-stories",
+                    headers={"Authorization": "Bearer test"},
+                    json=payload,
+                )
+                for payload in invalid_payloads
+            ]
+            proxy.return_value = (200, [])
+            missing_update = self.client.patch(
+                f"/api/star-stories/{story_id}",
+                headers={"Authorization": "Bearer test"},
+                json=valid,
+            )
+            missing_delete = self.client.delete(
+                f"/api/star-stories/{story_id}",
+                headers={"Authorization": "Bearer test"},
+            )
+            invalid_id = self.client.delete(
+                "/api/star-stories/not-a-uuid",
+                headers={"Authorization": "Bearer test"},
+            )
+
+        self.assertTrue(all(response.status_code == 400 for response in responses))
+        self.assertEqual(missing_update.status_code, 404)
+        self.assertEqual(missing_delete.status_code, 404)
+        self.assertEqual(invalid_id.status_code, 400)
+        self.assertEqual(proxy.call_count, 2)
+
     def test_portfolio_project_api_requires_job_seeker_and_reports_missing_migration(self):
         role_error = ({"error": "Job seekers only."}, 403)
         with patch.object(
@@ -678,6 +1181,139 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertEqual(service_error.status_code, 503)
         self.assertIn("temporarily unavailable", service_error.json["error"])
 
+    def test_job_match_what_if_requires_seeker_and_validates_skills(self):
+        job_id = "11111111-1111-4111-8111-111111111111"
+        path = f"/api/job-recommendations/{job_id}/what-if"
+        unauthenticated = self.client.post(
+            path,
+            json={"add_skills": ["Python"], "remove_skills": []},
+        )
+        forbidden = ({"error": "Job seekers only."}, 403)
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=forbidden
+        ) as verify_seeker, patch.object(app_module, "supabase_rest_request") as proxy:
+            denied = self.client.post(
+                path,
+                headers={"Authorization": "Bearer provider-token"},
+                json={"add_skills": ["Python"], "remove_skills": []},
+            )
+        self.assertEqual(unauthenticated.status_code, 401)
+        self.assertEqual(denied.status_code, 403)
+        verify_seeker.assert_called_once()
+        proxy.assert_not_called()
+
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            invalid = self.client.post(
+                path,
+                headers={"Authorization": "Bearer seeker-token"},
+                json={"add_skills": ["not a supported skill"], "remove_skills": []},
+            )
+        self.assertEqual(invalid.status_code, 400)
+        proxy.assert_not_called()
+
+    def test_job_match_what_if_returns_explainable_ephemeral_scores(self):
+        job_id = "11111111-1111-4111-8111-111111111111"
+        job = {
+            "id": job_id,
+            "title": "Backend Developer",
+            "company": "Example",
+            "description": "Required: Python and PostgreSQL.",
+            "requirements": "",
+        }
+        profile = {
+            "skills": ["Python"],
+            "headline": "",
+            "about": "Built Python tools for a class project.",
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, [job]),
+                    (200, [profile]),
+                    (200, []),
+                ],
+            ) as proxy,
+            patch.object(
+                app_module, "fetch_portfolio_projects", return_value=([], True, None)
+            ),
+        ):
+            response = self.client.post(
+                f"/api/job-recommendations/{job_id}/what-if",
+                headers={"Authorization": "Bearer seeker-token"},
+                json={"add_skills": ["postgres"], "remove_skills": []},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["baseline_score"], 50)
+        self.assertEqual(response.json["simulated_score"], 68)
+        self.assertEqual(response.json["delta"], 18)
+        self.assertEqual(response.json["added_skills"], ["PostgreSQL"])
+        self.assertEqual(profile["skills"], ["Python"])
+        self.assertIn("does not verify proficiency", response.json["note"])
+        self.assertEqual(
+            [call.kwargs.get("method", "GET") for call in proxy.call_args_list],
+            ["GET", "GET", "GET"],
+        )
+
+    def test_job_match_what_if_hides_unpublished_or_inaccessible_jobs(self):
+        job_id = "11111111-1111-4111-8111-111111111111"
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module,
+            "supabase_rest_request",
+            return_value=(200, []),
+        ) as proxy:
+            response = self.client.post(
+                f"/api/job-recommendations/{job_id}/what-if",
+                headers={"Authorization": "Bearer seeker-token"},
+                json={"add_skills": ["Python"], "remove_skills": []},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(proxy.call_count, 1)
+        self.assertIn("status=eq.published", proxy.call_args.args[0])
+
+    def test_job_match_what_if_keeps_insufficient_baseline_unscored(self):
+        job_id = "11111111-1111-4111-8111-111111111111"
+        job = {
+            "id": job_id,
+            "title": "Developer",
+            "company": "Example",
+            "description": "Python is required.",
+            "requirements": "",
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, [job]),
+                    (200, [{"skills": [], "headline": "", "about": ""}]),
+                    (200, []),
+                ],
+            ),
+            patch.object(
+                app_module, "fetch_portfolio_projects", return_value=([], True, None)
+            ),
+        ):
+            response = self.client.post(
+                f"/api/job-recommendations/{job_id}/what-if",
+                headers={"Authorization": "Bearer seeker-token"},
+                json={"add_skills": ["Python"], "remove_skills": []},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json["baseline_score"])
+        self.assertEqual(response.json["simulated_score"], 35)
+        self.assertIsNone(response.json["delta"])
+
     def test_learning_catalogue_and_plan_require_a_job_seeker_session(self):
         unauthenticated = self.client.get("/api/learning/resources")
         role_error = ({"error": "Job seekers only."}, 403)
@@ -732,7 +1368,7 @@ class CareerLensApiTests(unittest.TestCase):
             "resource:learning_resources(id,title,description,provider,"
             "resource_url,difficulty,resource_type,skill_tags,objectives,"
             "category:learning_categories(name,slug))"
-            "&order=updated_at.desc"
+            "&order=updated_at.desc&limit=500"
         ))
 
     def test_empty_learning_catalogue_and_plan_return_real_empty_lists(self):
@@ -1033,6 +1669,24 @@ class CareerLensApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
+    def test_interview_prep_rejects_provider_role(self):
+        with patch.object(
+            app_module,
+            "verify_supabase_job_seeker",
+            return_value=({"error": "Job seekers only."}, 403),
+        ):
+            response = self.client.post(
+                "/api/interview-prep",
+                headers={"Authorization": "Bearer provider-session"},
+                json={
+                    "role": "Data Analyst",
+                    "job_description": "SQL and analytics experience required for this role.",
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json["error"], "Job seekers only.")
+
     def test_interview_prep_returns_targeted_questions_and_checklist(self):
         response = self.post_interview_prep({
             "role": "Backend Developer",
@@ -1057,12 +1711,13 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertIn("not predictions", response.json["note"])
 
     def test_interview_prep_validates_json_and_input_limits(self):
-        not_json = self.client.post(
-            "/api/interview-prep",
-            headers={"Authorization": "Bearer valid-session"},
-            data="not json",
-            content_type="text/plain",
-        )
+        with patch.object(app_module, "verify_supabase_job_seeker", return_value=None):
+            not_json = self.client.post(
+                "/api/interview-prep",
+                headers={"Authorization": "Bearer valid-session"},
+                data="not json",
+                content_type="text/plain",
+            )
         short_description = self.post_interview_prep({
             "role": "Developer",
             "job_description": "Too short",
@@ -1104,6 +1759,60 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertIn("Confirm", no_consent.json["error"])
         self.assertEqual(invalid_job.status_code, 400)
         self.assertIn("valid identifier", invalid_job.json["error"])
+
+    def test_application_materials_bound_profile_and_job_text_before_gemini(self):
+        job_id = "00000000-0000-0000-0000-000000000001"
+        responses = [
+            (200, [{"id": job_id, "title": "Engineer", "description": "Role"}]),
+            (200, [{}]),
+            (200, []),
+            (200, []),
+        ]
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module, "GEMINI_API_KEY", "test-key"
+        ), patch.object(
+            app_module, "MAX_APPLICATION_MATERIALS_INPUT_LENGTH", 1
+        ), patch.object(
+            app_module, "supabase_rest_request", side_effect=responses
+        ), patch.object(app_module, "urlopen") as gemini_request:
+            response = self.client.post(
+                "/api/application-materials",
+                headers={"Authorization": "Bearer seeker-session"},
+                json={"job_id": job_id, "consent": True},
+            )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("input limit", response.json["error"])
+        gemini_request.assert_not_called()
+
+    def test_application_materials_share_gemini_rate_limit(self):
+        job_id = "00000000-0000-0000-0000-000000000001"
+        responses = [
+            (200, [{"id": job_id, "title": "Engineer", "description": "Role"}]),
+            (200, [{}]),
+            (200, []),
+            (200, []),
+        ]
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module, "GEMINI_API_KEY", "test-key"
+        ), patch.object(
+            app_module, "GEMINI_REQUESTS_PER_MINUTE", 0
+        ), patch.object(
+            app_module, "supabase_rest_request", side_effect=responses
+        ), patch.object(app_module, "urlopen") as gemini_request:
+            response = self.client.post(
+                "/api/application-materials",
+                headers={"Authorization": "Bearer seeker-session"},
+                json={"job_id": job_id, "consent": True},
+            )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "60")
+        gemini_request.assert_not_called()
 
     def test_retired_feature_routes_are_not_exposed(self):
         for path in ("/api/analyze-resume", "/api/community/posts"):
@@ -1168,6 +1877,310 @@ class CareerLensApiTests(unittest.TestCase):
         self.assertEqual(long_role.status_code, 400)
         self.assertEqual(self.auth_urlopen.call_count, 5)
 
+    def test_ai_assist_rate_limiter_returns_json_429_and_retry_after(self):
+        payload = {
+            "task": "resume_feedback",
+            "role": "Data Analyst",
+            "text": "A resume excerpt with enough characters for useful feedback.",
+            "consent": True,
+        }
+        with patch.object(app_module, "GEMINI_API_KEY", "test-key"), patch.object(
+            app_module, "GEMINI_REQUESTS_PER_MINUTE", 0
+        ), patch.object(
+            app_module, "verify_supabase_user", return_value=(True, None)
+        ), patch.object(app_module, "urlopen") as gemini_request:
+            response = self.post_ai_assist(payload)
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "60")
+        self.assertIn("error", response.json)
+        gemini_request.assert_not_called()
+
+    def test_gemini_rate_limiter_caps_each_hashed_session(self):
+        bearer = "Bearer distinct-session-token"
+        with app_module.app.test_request_context(
+            headers={"Authorization": bearer}
+        ), patch.object(app_module, "GEMINI_REQUESTS_PER_MINUTE", 1):
+            with app_module._GEMINI_RATE_LIMIT_LOCK:
+                app_module._GEMINI_RATE_LIMIT_WINDOWS.clear()
+            first = app_module.consume_gemini_request()
+            second = app_module.consume_gemini_request()
+            stored_keys = tuple(app_module._GEMINI_RATE_LIMIT_WINDOWS)
+
+        self.assertIsNone(first)
+        self.assertEqual(second, 60)
+        self.assertEqual(len(stored_keys), 1)
+        self.assertNotIn(bearer.encode("utf-8"), stored_keys)
+        with app_module._GEMINI_RATE_LIMIT_LOCK:
+            app_module._GEMINI_RATE_LIMIT_WINDOWS.clear()
+
+    def test_api_errors_are_json_and_unexpected_logs_exclude_exception_details(self):
+        missing = self.client.get("/api/not-a-route")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.mimetype, "application/json")
+        self.assertIn("error", missing.json)
+
+        private_detail = "private-user-data-and-token"
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module,
+            "supabase_rest_request",
+            side_effect=RuntimeError(private_detail),
+        ), self.assertLogs(app_module.app.logger, level="ERROR") as captured:
+            failed = self.client.get(
+                "/api/saved-jobs",
+                headers={"Authorization": "Bearer test-session"},
+            )
+
+        self.assertEqual(failed.status_code, 500)
+        self.assertEqual(failed.mimetype, "application/json")
+        self.assertNotIn(private_detail, failed.get_data(as_text=True))
+        self.assertNotIn(private_detail, "\n".join(captured.output))
+        self.assertNotIn("test-session", "\n".join(captured.output))
+
+    def test_calendar_text_escapes_carriage_returns_and_newlines(self):
+        value = app_module.ics_escape("Interview\r\nATTENDEE:unexpected")
+
+        self.assertEqual(value, r"Interview\nATTENDEE:unexpected")
+
+    def test_interview_calendar_requires_authentication_and_valid_application_id(self):
+        denied = ({"error": "Authentication required."}, 401)
+        with patch.object(
+            app_module, "verify_supabase_user", return_value=(None, denied)
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            response = self.client.get(
+                "/api/job-applications/11111111-1111-4111-8111-111111111111/interview.ics"
+            )
+        self.assertEqual(response.status_code, 401)
+        proxy.assert_not_called()
+
+        with patch.object(
+            app_module, "verify_supabase_user", return_value=({"id": "seeker"}, None)
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            invalid = self.client.get("/api/job-applications/not-a-uuid/interview.ics")
+        self.assertEqual(invalid.status_code, 400)
+        proxy.assert_not_called()
+
+    def test_interview_calendar_exports_only_an_accessible_application_with_an_interview(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        application = {
+            "id": application_id,
+            "job_title": "Backend Developer",
+            "company": "Example Co",
+        }
+        interview_at = "2026-12-01T10:00:00Z"
+        with (
+            patch.object(
+                app_module, "verify_supabase_user", return_value=({"id": "seeker"}, None)
+            ),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, [application]),
+                    (200, []),
+                    (200, [{"interview_at": interview_at}]),
+                ],
+            ) as proxy,
+        ):
+            response = self.client.get(
+                f"/api/job-applications/{application_id}/interview.ics",
+                headers={"Authorization": "Bearer session-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "text/calendar")
+        self.assertIn("DTSTART:20261201T100000Z", response.get_data(as_text=True))
+        self.assertIn("SUMMARY:Interview: Backend Developer", response.get_data(as_text=True))
+        self.assertEqual(proxy.call_count, 3)
+
+        with (
+            patch.object(
+                app_module, "verify_supabase_user", return_value=({"id": "other-user"}, None)
+            ),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[(200, []), (200, []), (200, [])],
+            ),
+        ):
+            hidden = self.client.get(
+                f"/api/job-applications/{application_id}/interview.ics",
+                headers={"Authorization": "Bearer other-session"},
+            )
+        self.assertEqual(hidden.status_code, 404)
+        self.assertIn("No interview date", hidden.json["error"])
+
+        with (
+            patch.object(
+                app_module,
+                "verify_supabase_user",
+                return_value=({"id": "provider", "account_type": "job_provider"}, None),
+            ),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, [application]),
+                    (200, []),
+                    (200, [{"interview_at": interview_at}]),
+                ],
+            ),
+        ):
+            provider_calendar = self.client.get(
+                f"/api/job-applications/{application_id}/interview.ics",
+                headers={"Authorization": "Bearer provider-session"},
+            )
+        self.assertEqual(provider_calendar.status_code, 200)
+
+    def test_interview_slot_routes_enforce_roles_and_validate_provider_input(self):
+        unauthenticated = ({"error": "Sign in first."}, 401)
+        with patch.object(
+            app_module,
+            "verify_supabase_job_seeker",
+            return_value=unauthenticated,
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            no_session = self.client.get("/api/job-applications/interview-slots")
+        self.assertEqual(no_session.status_code, 401)
+        proxy.assert_not_called()
+
+        denied = ({"error": "Job providers only."}, 403)
+        with patch.object(
+            app_module, "verify_supabase_job_provider", return_value=denied
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            response = self.client.get(
+                "/api/provider/interview-slots",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+        self.assertEqual(response.status_code, 403)
+        proxy.assert_not_called()
+
+        with patch.object(
+            app_module,
+            "verify_supabase_job_seeker",
+            return_value=({"error": "Job seekers only."}, 403),
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            seeker_denied = self.client.get(
+                "/api/job-applications/interview-slots",
+                headers={"Authorization": "Bearer provider-token"},
+            )
+        self.assertEqual(seeker_denied.status_code, 403)
+        proxy.assert_not_called()
+
+        with patch.object(
+            app_module, "verify_supabase_job_provider", return_value=None
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            invalid = self.client.post(
+                "/api/provider/job-applications/11111111-1111-4111-8111-111111111111/interview-slots",
+                headers={"Authorization": "Bearer provider-token"},
+                json={"starts_at": "tomorrow"},
+            )
+        self.assertEqual(invalid.status_code, 400)
+        proxy.assert_not_called()
+
+    def test_provider_can_offer_a_future_interview_slot_and_empty_lists_are_supported(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        slot = {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "application_id": application_id,
+            "status": "available",
+        }
+        starts_at = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        with (
+            patch.object(
+                app_module, "verify_supabase_job_provider", return_value=None
+            ),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, []),
+                    (201, [slot]),
+                    (200, {"id": slot["id"], "status": "cancelled"}),
+                ],
+            ) as proxy,
+        ):
+            empty = self.client.get(
+                "/api/provider/interview-slots",
+                headers={"Authorization": "Bearer provider-token"},
+            )
+            created = self.client.post(
+                f"/api/provider/job-applications/{application_id}/interview-slots",
+                headers={"Authorization": "Bearer provider-token"},
+                json={"starts_at": starts_at},
+            )
+            cancelled = self.client.post(
+                f"/api/provider/interview-slots/{slot['id']}/cancel",
+                headers={"Authorization": "Bearer provider-token"},
+            )
+
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.json["slots"], [])
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json["slot"], slot)
+        self.assertNotIn("provider_id", proxy.call_args_list[1].kwargs["payload"])
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(
+            proxy.call_args_list[2].args[0],
+            "rpc/cancel_provider_interview_slot",
+        )
+
+    def test_applicant_can_book_and_cancel_a_slot_and_conflicts_are_safe(self):
+        slot_id = "22222222-2222-4222-8222-222222222222"
+        booked = {"id": slot_id, "status": "booked"}
+        cancelled = {"id": slot_id, "status": "cancelled"}
+        with (
+            patch.object(
+                app_module, "verify_supabase_job_seeker", return_value=None
+            ),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, []),
+                    (200, booked),
+                    (200, cancelled),
+                ],
+            ) as proxy,
+        ):
+            empty = self.client.get(
+                "/api/job-applications/interview-slots",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+            booking = self.client.post(
+                f"/api/job-applications/interview-slots/{slot_id}/book",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+            cancellation = self.client.post(
+                f"/api/job-applications/interview-slots/{slot_id}/cancel",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.json["slots"], [])
+        self.assertEqual(booking.status_code, 200)
+        self.assertEqual(cancellation.status_code, 200)
+        self.assertEqual(proxy.call_args_list[1].args[0], "rpc/book_application_interview_slot")
+        self.assertEqual(proxy.call_args_list[2].args[0], "rpc/cancel_application_interview_slot")
+
+        with (
+            patch.object(
+                app_module, "verify_supabase_job_seeker", return_value=None
+            ),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                return_value=(400, {"code": "23505"}),
+            ),
+        ):
+            conflict = self.client.post(
+                f"/api/job-applications/interview-slots/{slot_id}/book",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+        self.assertEqual(conflict.status_code, 409)
+        self.assertNotIn("23505", conflict.json["error"])
+
     def test_ai_assist_restricts_employer_tasks_to_job_providers(self):
         payload = {
             "task": "interview_kit",
@@ -1212,6 +2225,835 @@ class CareerLensApiTests(unittest.TestCase):
         )
         self.assertEqual(request.method, "POST")
         self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+
+    def test_provider_listing_routes_reject_non_providers(self):
+        forbidden = ({"error": "Job providers only."}, 403)
+        paths = (
+            ("/api/provider/job-listings/11111111-1111-4111-8111-111111111111/duplicate", "post"),
+            ("/api/provider/job-listings/11111111-1111-4111-8111-111111111111/status", "patch"),
+        )
+        with patch.object(
+            app_module, "verify_supabase_job_provider", return_value=forbidden
+        ) as verify_provider, patch.object(app_module, "supabase_rest_request") as proxy:
+            responses = [
+                getattr(self.client, method)(
+                    path,
+                    headers={"Authorization": "Bearer seeker-token"},
+                    json={"status": "published"} if method == "patch" else None,
+                )
+                for path, method in paths
+            ]
+
+        self.assertEqual([response.status_code for response in responses], [403, 403])
+        self.assertEqual(verify_provider.call_count, 2)
+        proxy.assert_not_called()
+
+    def test_provider_listing_status_and_duplicate_routes_validate_and_execute(self):
+        listing_id = "11111111-1111-4111-8111-111111111111"
+        listing = {
+            "title": "Backend Developer",
+            "company": "Example Co",
+            "location": "Remote",
+            "workplace_type": "Remote",
+            "employment_type": "Full-time",
+            "description": "A detailed role description for an experienced Python backend developer.",
+            "requirements": "Required: Python",
+        }
+        duplicate = {**listing, "title": "Backend Developer (copy)", "status": "draft"}
+        with (
+            patch.object(app_module, "verify_supabase_job_provider", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, [{**listing, "status": "published"}]),
+                    (200, [listing]),
+                    (201, [duplicate]),
+                ],
+            ) as proxy,
+        ):
+            updated = self.client.patch(
+                f"/api/provider/job-listings/{listing_id}/status",
+                headers={"Authorization": "Bearer provider-token"},
+                json={"status": "published"},
+            )
+            copied = self.client.post(
+                f"/api/provider/job-listings/{listing_id}/duplicate",
+                headers={"Authorization": "Bearer provider-token"},
+            )
+
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(copied.status_code, 201)
+        self.assertEqual(copied.json["job"]["status"], "draft")
+        self.assertTrue(copied.json["job"]["title"].endswith("(copy)"))
+        self.assertEqual(proxy.call_args_list[0].kwargs["method"], "PATCH")
+        self.assertEqual(proxy.call_args_list[1].args[0], f"job_listings?select=title,company,location,workplace_type,employment_type,description,requirements&id=eq.{listing_id}")
+        self.assertEqual(proxy.call_args_list[2].kwargs["payload"]["status"], "draft")
+
+    def test_provider_review_route_rejects_job_seekers(self):
+        forbidden = ({"error": "Job providers only."}, 403)
+        with patch.object(
+            app_module, "verify_supabase_job_provider", return_value=forbidden
+        ) as verify_provider, patch.object(
+            app_module, "supabase_rest_request"
+        ) as proxy:
+            response = self.client.get(
+                "/api/provider/application-reviews",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn("reviewer_notes", response.get_data(as_text=True))
+        verify_provider.assert_called_once()
+        proxy.assert_not_called()
+
+    def test_provider_rejection_status_requires_valid_reason_and_bounded_note(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        path = f"/api/provider/job-applications/{application_id}/status"
+        request_headers = {"Authorization": "Bearer provider-token"}
+        forbidden = ({"error": "Job providers only."}, 403)
+        with patch.object(
+            app_module, "verify_supabase_job_provider", return_value=forbidden
+        ) as verify_provider, patch.object(app_module, "supabase_rest_request") as proxy:
+            denied = self.client.patch(path, headers=request_headers, json={"status": "Rejected"})
+        self.assertEqual(denied.status_code, 403)
+        verify_provider.assert_called_once()
+        proxy.assert_not_called()
+
+        with patch.object(
+            app_module, "verify_supabase_job_provider", return_value=None
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            missing = self.client.patch(path, headers=request_headers, json={"status": "Rejected"})
+            invalid = self.client.patch(
+                path,
+                headers=request_headers,
+                json={"status": "Rejected", "rejection_reason": "not_a_reason"},
+            )
+            long_note = self.client.patch(
+                path,
+                headers=request_headers,
+                json={
+                    "status": "Rejected",
+                    "rejection_reason": "other",
+                    "rejection_note": "x" * 501,
+                },
+            )
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(long_note.status_code, 400)
+        proxy.assert_not_called()
+
+    def test_provider_rejection_status_saves_atomically_with_opt_in_sharing(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        request_headers = {"Authorization": "Bearer provider-token"}
+        rpc_result = {
+            "application_id": application_id,
+            "status": "Rejected",
+            "rejection_reason": "skills_gap",
+            "rejection_note": "The role requires hands-on production experience.",
+            "rejection_note_shared": True,
+            "rejected_at": "2026-04-04T10:00:00Z",
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_provider", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, [{
+                        "id": application_id,
+                        "job_title": "Backend Engineer",
+                        "company": "Example",
+                        "applicant_email": "seeker@example.com",
+                    }]),
+                    (200, rpc_result),
+                ],
+            ) as proxy,
+            patch.object(app_module, "send_notification_email") as send_email,
+        ):
+            response = self.client.patch(
+                f"/api/provider/job-applications/{application_id}/status",
+                headers=request_headers,
+                json={
+                    "status": "Rejected",
+                    "rejection_reason": "skills_gap",
+                    "rejection_note": "  The role requires hands-on production experience.  ",
+                    "rejection_note_shared": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["application"], rpc_result)
+        self.assertEqual(
+            proxy.call_args_list[1].args[0],
+            "rpc/update_job_application_status_with_rejection",
+        )
+        self.assertEqual(
+            proxy.call_args_list[1].kwargs["payload"],
+            {
+                "_application_id": application_id,
+                "_status": "Rejected",
+                "_rejection_reason": "skills_gap",
+                "_rejection_note": "The role requires hands-on production experience.",
+                "_rejection_note_shared": True,
+            },
+        )
+        send_email.assert_called_once()
+        self.assertNotIn("reviewer_notes", response.get_data(as_text=True))
+
+    def test_non_owner_provider_cannot_update_application_stage(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        with patch.object(
+            app_module, "verify_supabase_job_provider", return_value=None
+        ), patch.object(
+            app_module,
+            "supabase_rest_request",
+            return_value=(200, []),
+        ) as proxy:
+            response = self.client.patch(
+                f"/api/provider/job-applications/{application_id}/status",
+                headers={"Authorization": "Bearer other-provider-token"},
+                json={
+                    "status": "Rejected",
+                    "rejection_reason": "other",
+                },
+            )
+        self.assertEqual(response.status_code, 404)
+        proxy.assert_called_once()
+
+    def test_provider_stage_change_sends_no_rejection_fields_to_clear_old_feedback(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        with (
+            patch.object(app_module, "verify_supabase_job_provider", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, [{
+                        "id": application_id,
+                        "job_title": "Backend Engineer",
+                        "company": "Example",
+                        "applicant_email": "seeker@example.com",
+                    }]),
+                    (200, {
+                        "application_id": application_id,
+                        "status": "Interview",
+                        "rejection_reason": None,
+                        "rejection_note": None,
+                        "rejection_note_shared": False,
+                        "rejected_at": None,
+                    }),
+                ],
+            ) as proxy,
+            patch.object(app_module, "send_notification_email"),
+        ):
+            response = self.client.patch(
+                f"/api/provider/job-applications/{application_id}/status",
+                headers={"Authorization": "Bearer provider-token"},
+                json={"status": "Interview"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(proxy.call_args_list[1].kwargs["payload"]["_rejection_reason"])
+        self.assertIsNone(proxy.call_args_list[1].kwargs["payload"]["_rejection_note"])
+
+    def test_applicant_rejection_feedback_is_seeker_only_and_redacts_unshared_note(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        path = f"/api/job-applications/{application_id}/rejection-feedback"
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            proxy.return_value = (200, [])
+            inaccessible = self.client.get(
+                path, headers={"Authorization": "Bearer other-seeker-token"}
+            )
+        self.assertEqual(inaccessible.status_code, 404)
+        proxy.assert_called_once()
+
+        unshared_feedback = {
+            "rejection_reason": "skills_gap",
+            "rejection_note": None,
+            "rejected_at": "2026-04-04T10:00:00Z",
+            "job_title": "Backend Engineer",
+            "job_description": "Build services and deploy them safely.",
+            "job_requirements": "Python and production operations experience.",
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                return_value=(200, [unshared_feedback]),
+            ) as proxy,
+        ):
+            visible = self.client.get(
+                path, headers={"Authorization": "Bearer seeker-token"}
+            )
+        self.assertEqual(visible.status_code, 200)
+        self.assertIsNone(visible.json["feedback"]["rejection_note"])
+        self.assertEqual(visible.json["feedback"]["rejection_reason"], "skills_gap")
+        self.assertNotIn("reviewer_notes", visible.get_data(as_text=True))
+        self.assertNotIn("applicant_id", visible.get_data(as_text=True))
+        self.assertNotIn("applicant_email", visible.get_data(as_text=True))
+        self.assertNotIn("private note", visible.get_data(as_text=True))
+        self.assertEqual(
+            proxy.call_args.kwargs["payload"],
+            {"_application_id": application_id},
+        )
+
+        shared_feedback = {
+            **unshared_feedback,
+            "rejection_note": "The provider opted to share this note.",
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                return_value=(200, [shared_feedback]),
+            ),
+        ):
+            shared = self.client.get(
+                path, headers={"Authorization": "Bearer seeker-token"}
+            )
+        self.assertEqual(shared.status_code, 200)
+        self.assertEqual(
+            shared.json["feedback"]["rejection_note"],
+            "The provider opted to share this note.",
+        )
+
+    def test_applicant_rejection_feedback_empty_state_and_role_check(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        path = f"/api/job-applications/{application_id}/rejection-feedback"
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module,
+            "supabase_rest_request",
+            return_value=(200, [{
+                "rejection_reason": None,
+                "rejection_note": None,
+                "rejected_at": None,
+                "job_title": "Backend Engineer",
+                "job_description": "Build services and deploy them safely.",
+                "job_requirements": "",
+            }]),
+        ):
+            empty = self.client.get(
+                path, headers={"Authorization": "Bearer seeker-token"}
+            )
+        self.assertEqual(empty.status_code, 200)
+        self.assertIsNone(empty.json["feedback"]["rejection_reason"])
+        self.assertIsNone(empty.json["feedback"]["rejection_note"])
+
+        with patch.object(
+            app_module,
+            "verify_supabase_job_seeker",
+            return_value=({"error": "Job seekers only."}, 403),
+        ) as verify_seeker, patch.object(app_module, "supabase_rest_request") as proxy:
+            forbidden = self.client.get(
+                path, headers={"Authorization": "Bearer provider-token"}
+            )
+        self.assertEqual(forbidden.status_code, 403)
+        verify_seeker.assert_called_once()
+        proxy.assert_not_called()
+
+    def test_provider_applicant_evidence_rejects_job_seekers(self):
+        forbidden = ({"error": "Job providers only."}, 403)
+        with patch.object(
+            app_module, "verify_supabase_job_provider", return_value=forbidden
+        ) as verify_provider, patch.object(app_module, "supabase_rest_request") as proxy:
+            response = self.client.get(
+                "/api/provider-applicant-evidence",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn("reviewer_notes", response.get_data(as_text=True))
+        verify_provider.assert_called_once()
+        proxy.assert_not_called()
+
+    def test_provider_application_stage_and_interview_routes_reject_job_seekers(self):
+        forbidden = ({"error": "Job providers only."}, 403)
+        application_id = "11111111-1111-4111-8111-111111111111"
+        with patch.object(
+            app_module, "verify_supabase_job_provider", return_value=forbidden
+        ) as verify_provider, patch.object(app_module, "supabase_rest_request") as proxy:
+            stage = self.client.patch(
+                f"/api/provider/job-applications/{application_id}/status",
+                headers={"Authorization": "Bearer seeker-token"},
+                json={"status": "Interview"},
+            )
+            interview = self.client.post(
+                f"/api/provider/application-reviews/{application_id}",
+                headers={"Authorization": "Bearer seeker-token"},
+                json={"reviewer_notes": "private", "interview_at": "2026-12-01T10:00:00Z"},
+            )
+
+        self.assertEqual(stage.status_code, 403)
+        self.assertEqual(interview.status_code, 403)
+        self.assertEqual(verify_provider.call_count, 2)
+        proxy.assert_not_called()
+
+    def test_application_status_timeline_requires_a_job_seeker(self):
+        response = self.client.get(
+            "/api/job-applications/11111111-1111-4111-8111-111111111111/timeline"
+        )
+        self.assertEqual(response.status_code, 401)
+
+        with patch.object(
+            app_module,
+            "verify_supabase_job_seeker",
+            return_value=({"error": "Job seekers only."}, 403),
+        ) as verify_seeker, patch.object(app_module, "supabase_rest_request") as proxy:
+            forbidden = self.client.get(
+                "/api/job-applications/11111111-1111-4111-8111-111111111111/timeline",
+                headers={"Authorization": "Bearer provider-token"},
+            )
+
+        self.assertEqual(forbidden.status_code, 403)
+        verify_seeker.assert_called_once()
+        proxy.assert_not_called()
+
+    def test_application_status_timeline_validates_id_and_isolates_inaccessible_applications(self):
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(app_module, "supabase_rest_request") as proxy:
+            proxy.return_value = (200, [])
+            invalid = self.client.get(
+                "/api/job-applications/not-a-uuid/timeline",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+            inaccessible = self.client.get(
+                "/api/job-applications/11111111-1111-4111-8111-111111111111/timeline",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(inaccessible.status_code, 404)
+        self.assertEqual(proxy.call_count, 1)
+
+    def test_application_status_timeline_returns_ordered_events_without_private_notes(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, [{
+                        "id": application_id,
+                        "status": "Interview",
+                        "created_at": "2026-04-02T09:00:00Z",
+                    }]),
+                    (200, [
+                        {
+                            "from_status": "Shortlisted",
+                            "to_status": "Interview",
+                            "changed_at": "2026-04-03T11:00:00Z",
+                        },
+                        {
+                            "from_status": None,
+                            "to_status": "Submitted",
+                            "changed_at": "2026-04-02T09:00:00Z",
+                        },
+                    ]),
+                ],
+            ) as proxy,
+        ):
+            response = self.client.get(
+                f"/api/job-applications/{application_id}/timeline",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json["history_complete"])
+        self.assertEqual(response.json["current_status"], "Interview")
+        self.assertEqual(
+            [event["to_status"] for event in response.json["events"]],
+            ["Submitted", "Interview"],
+        )
+        self.assertNotIn("reviewer_notes", response.get_data(as_text=True))
+        self.assertIn("application_status_events?select=from_status,to_status,changed_at", proxy.call_args_list[1].args[0])
+
+    def test_application_status_timeline_marks_legacy_history_as_incomplete(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module,
+            "supabase_rest_request",
+            side_effect=[
+                (200, [{
+                    "id": application_id,
+                    "status": "Interview",
+                    "created_at": "2025-11-02T09:00:00Z",
+                }]),
+                (200, []),
+            ],
+        ):
+            response = self.client.get(
+                f"/api/job-applications/{application_id}/timeline",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json["history_complete"])
+        self.assertEqual(response.json["events"], [])
+        self.assertEqual(response.json["current_status"], "Interview")
+        self.assertEqual(response.json["submitted_at"], "2025-11-02T09:00:00Z")
+
+    def test_response_metrics_routes_require_authentication_and_account_roles(self):
+        job_id = "11111111-1111-4111-8111-111111111111"
+        unauthenticated = [
+            self.client.get("/api/jobs/responsiveness"),
+            self.client.get(f"/api/jobs/{job_id}/responsiveness"),
+            self.client.get("/api/provider/response-metrics"),
+        ]
+        self.assertTrue(all(response.status_code == 401 for response in unauthenticated))
+
+        seeker_forbidden = ({"error": "Job seekers only."}, 403)
+        provider_forbidden = ({"error": "Job providers only."}, 403)
+        with (
+            patch.object(
+                app_module, "verify_supabase_job_seeker", return_value=seeker_forbidden
+            ),
+            patch.object(
+                app_module, "verify_supabase_job_provider", return_value=provider_forbidden
+            ),
+            patch.object(app_module, "supabase_rest_request") as proxy,
+        ):
+            denied = [
+                self.client.get(
+                    "/api/jobs/responsiveness",
+                    headers={"Authorization": "Bearer provider-token"},
+                ),
+                self.client.get(
+                    f"/api/jobs/{job_id}/responsiveness",
+                    headers={"Authorization": "Bearer provider-token"},
+                ),
+                self.client.get(
+                    "/api/provider/response-metrics",
+                    headers={"Authorization": "Bearer seeker-token"},
+                ),
+            ]
+
+        self.assertEqual([response.status_code for response in denied], [403, 403, 403])
+        proxy.assert_not_called()
+
+    def test_job_responsiveness_rejects_malformed_listing_ids(self):
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(app_module, "supabase_rest_request") as proxy,
+        ):
+            response = self.client.get(
+                "/api/jobs/not-a-uuid/responsiveness",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        proxy.assert_not_called()
+
+    def test_response_metrics_batch_and_detail_routes_expose_only_thresholded_summaries(self):
+        job_id = "11111111-1111-4111-8111-111111111111"
+        metrics = {
+            "job_id": job_id,
+            "response_rate": 60.0,
+            "median_first_response_days": 2.5,
+            "sample_size": 5,
+            "sufficient_data": True,
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_seeker", return_value=None),
+            patch.object(
+                app_module, "supabase_rest_request", return_value=(200, [metrics])
+            ) as proxy,
+        ):
+            batch = self.client.get(
+                "/api/jobs/responsiveness",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+            detail = self.client.get(
+                f"/api/jobs/{job_id}/responsiveness",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+
+        self.assertEqual(batch.status_code, 200)
+        self.assertEqual(batch.json, {"metrics": [metrics]})
+        self.assertEqual(
+            detail.json,
+            {
+                "response_rate": 60.0,
+                "median_first_response_days": 2.5,
+                "sample_size": 5,
+                "sufficient_data": True,
+            },
+        )
+        self.assertNotIn("applicant_id", json.dumps(batch.json))
+        self.assertNotIn("applicant_name", json.dumps(batch.json))
+        self.assertEqual(
+            proxy.call_args_list[0].args[0], "rpc/get_job_responsiveness"
+        )
+        self.assertEqual(proxy.call_args_list[0].kwargs["payload"], {"_job_id": None})
+        self.assertEqual(
+            proxy.call_args_list[1].kwargs["payload"], {"_job_id": job_id}
+        )
+
+    def test_response_metrics_preserve_odd_even_medians_and_zero_application_state(self):
+        job_id = "11111111-1111-4111-8111-111111111111"
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ):
+            for sample_size, median in ((5, 3.0), (6, 2.5)):
+                metrics = {
+                    "job_id": job_id,
+                    "response_rate": 50.0,
+                    "median_first_response_days": median,
+                    "sample_size": sample_size,
+                    "sufficient_data": True,
+                }
+                with patch.object(
+                    app_module, "supabase_rest_request", return_value=(200, [metrics])
+                ):
+                    response = self.client.get(
+                        f"/api/jobs/{job_id}/responsiveness",
+                        headers={"Authorization": "Bearer seeker-token"},
+                    )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json["median_first_response_days"], median
+                )
+
+            insufficient_responses = []
+            for sample_size in (4, 0):
+                metrics = {
+                    "job_id": job_id,
+                    "response_rate": None,
+                    "median_first_response_days": None,
+                    "sample_size": sample_size,
+                    "sufficient_data": False,
+                }
+                with patch.object(
+                    app_module,
+                    "supabase_rest_request",
+                    return_value=(200, [metrics]),
+                ):
+                    insufficient_responses.append(self.client.get(
+                        f"/api/jobs/{job_id}/responsiveness",
+                        headers={"Authorization": "Bearer seeker-token"},
+                    ))
+
+        for empty in insufficient_responses:
+            self.assertEqual(empty.status_code, 200)
+            self.assertIsNone(empty.json["response_rate"])
+            self.assertIsNone(empty.json["median_first_response_days"])
+            self.assertFalse(empty.json["sufficient_data"])
+        self.assertEqual(insufficient_responses[-1].json["sample_size"], 0)
+
+    def test_provider_response_metrics_are_owner_role_checked_and_support_empty_samples(self):
+        empty_metrics = {
+            "response_rate": None,
+            "median_first_response_days": None,
+            "sample_size": 0,
+            "sufficient_data": False,
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_provider", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                return_value=(200, [empty_metrics]),
+            ) as proxy,
+        ):
+            response = self.client.get(
+                "/api/provider/response-metrics",
+                headers={"Authorization": "Bearer provider-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json, empty_metrics)
+        self.assertEqual(
+            proxy.call_args.args[0], "rpc/get_provider_response_metrics"
+        )
+
+    def test_application_analytics_requires_a_job_seeker_and_handles_insufficient_history(self):
+        forbidden = ({"error": "Job seekers only."}, 403)
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=forbidden
+        ) as verify_seeker, patch.object(app_module, "supabase_rest_request") as proxy:
+            denied = self.client.get(
+                "/api/application-analytics",
+                headers={"Authorization": "Bearer provider-token"},
+            )
+        self.assertEqual(denied.status_code, 403)
+        verify_seeker.assert_called_once()
+        proxy.assert_not_called()
+
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module, "supabase_rest_request", return_value=(200, [])
+        ):
+            empty = self.client.get(
+                "/api/application-analytics",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+        self.assertEqual(empty.status_code, 200)
+        self.assertIsNone(empty.json["average_first_response_hours"])
+        self.assertEqual(empty.json["measured_applications"], 0)
+        self.assertTrue(empty.json["complete"])
+
+    def test_application_analytics_calculates_only_complete_provider_response_timelines(self):
+        events = [
+            {
+                "application_id": "11111111-1111-4111-8111-111111111111",
+                "from_status": "Submitted",
+                "to_status": "CV review",
+                "changed_at": "2026-04-03T09:00:00Z",
+            },
+            {
+                "application_id": "11111111-1111-4111-8111-111111111111",
+                "from_status": None,
+                "to_status": "Submitted",
+                "changed_at": "2026-04-02T09:00:00Z",
+            },
+            {
+                "application_id": "22222222-2222-4222-8222-222222222222",
+                "from_status": None,
+                "to_status": "Submitted",
+                "changed_at": "2026-04-02T09:00:00Z",
+            },
+            {
+                "application_id": "33333333-3333-4333-8333-333333333333",
+                "from_status": None,
+                "to_status": "Submitted",
+                "changed_at": "2026-04-02T09:00:00Z",
+            },
+            {
+                "application_id": "33333333-3333-4333-8333-333333333333",
+                "from_status": "Submitted",
+                "to_status": "Withdrawn",
+                "changed_at": "2026-04-02T10:00:00Z",
+            },
+        ]
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module, "supabase_rest_request", return_value=(200, events)
+        ) as proxy:
+            response = self.client.get(
+                "/api/application-analytics",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["average_first_response_hours"], 24.0)
+        self.assertEqual(response.json["measured_applications"], 1)
+        self.assertTrue(response.json["complete"])
+        self.assertIn("manual tracker entries", response.json["calculation"])
+        self.assertIn("application_status_events?select=application_id", proxy.call_args.args[0])
+
+    def test_application_analytics_does_not_report_a_truncated_event_window(self):
+        events = [
+            {
+                "application_id": "11111111-1111-4111-8111-111111111111",
+                "from_status": None,
+                "to_status": "Submitted",
+                "changed_at": "2026-04-02T09:00:00Z",
+            }
+            for _ in range(1000)
+        ]
+        with patch.object(
+            app_module, "verify_supabase_job_seeker", return_value=None
+        ), patch.object(
+            app_module, "supabase_rest_request", return_value=(200, events)
+        ):
+            response = self.client.get(
+                "/api/application-analytics",
+                headers={"Authorization": "Bearer seeker-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json["complete"])
+        self.assertIsNone(response.json["average_first_response_hours"])
+        self.assertEqual(response.json["measured_applications"], 0)
+
+    def test_application_analytics_migration_adds_rerunnable_lookup_index(self):
+        migration = (
+            Path(__file__).parents[1]
+            / "backend"
+            / "migrations"
+            / "phase21_application_analytics.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("create index if not exists application_status_events_applicant_changed_idx", migration)
+        self.assertIn("applicant_id, changed_at, application_id", migration)
+        self.assertIn("notify pgrst, 'reload schema';", migration)
+
+    def test_first_response_calculation_skips_legacy_timelines_and_negative_durations(self):
+        result = app_module.calculate_first_response_time_hours([
+            {
+                "application_id": "legacy",
+                "from_status": "CV review",
+                "to_status": "Interview",
+                "changed_at": "2026-04-02T12:00:00Z",
+            },
+            {
+                "application_id": "negative",
+                "from_status": None,
+                "to_status": "Submitted",
+                "changed_at": "2026-04-02T12:00:00Z",
+            },
+            {
+                "application_id": "negative",
+                "from_status": "Submitted",
+                "to_status": "Interview",
+                "changed_at": "2026-04-02T11:00:00Z",
+            },
+        ])
+        self.assertEqual(
+            result,
+            {"average_hours": None, "measured_applications": 0},
+        )
+
+    def test_provider_can_set_interview_date_and_private_reviewer_notes(self):
+        application_id = "11111111-1111-4111-8111-111111111111"
+        interview_at = "2026-12-01T10:00:00Z"
+        review = {
+            "application_id": application_id,
+            "reviewer_notes": "Ask about Python project experience.",
+            "interview_at": interview_at,
+        }
+        with (
+            patch.object(app_module, "verify_supabase_job_provider", return_value=None),
+            patch.object(
+                app_module,
+                "supabase_rest_request",
+                side_effect=[
+                    (200, [{
+                        "id": application_id,
+                        "job_title": "Backend Developer",
+                        "company": "Example Co",
+                        "applicant_email": "candidate@example.com",
+                    }]),
+                    (200, []),
+                    (201, [review]),
+                ],
+            ) as proxy,
+            patch.object(app_module, "send_notification_email") as send_email,
+        ):
+            response = self.client.post(
+                f"/api/provider/application-reviews/{application_id}",
+                headers={"Authorization": "Bearer provider-token"},
+                json={
+                    "reviewer_notes": review["reviewer_notes"],
+                    "interview_at": interview_at,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["review"]["interview_at"], interview_at)
+        self.assertEqual(response.json["review"]["reviewer_notes"], review["reviewer_notes"])
+        self.assertEqual(proxy.call_args_list[2].kwargs["payload"], review)
+        send_email.assert_called_once()
 
     def test_ai_assist_allows_authorized_provider_employer_tasks(self):
         provider_response = MagicMock()
